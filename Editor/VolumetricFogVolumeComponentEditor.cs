@@ -35,6 +35,8 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 	private SerializedDataParameter maxAdditionalLights;
 	private SerializedDataParameter blurIterations;
 	private SerializedDataParameter transmittanceThreshold;
+	private SerializedDataParameter enableStaticLightsBake;
+	private SerializedDataParameter staticLightsBakeRevision;
 	private SerializedDataParameter enabled;
 	
 	private SerializedDataParameter renderPassEvent;
@@ -76,6 +78,8 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		maxAdditionalLights = Unpack(pf.Find(x => x.maxAdditionalLights));
 		blurIterations = Unpack(pf.Find(x => x.blurIterations));
 		transmittanceThreshold = Unpack(pf.Find(x => x.transmittanceThreshold));
+		enableStaticLightsBake = Unpack(pf.Find(x => x.enableStaticLightsBake));
+		staticLightsBakeRevision = Unpack(pf.Find(x => x.staticLightsBakeRevision));
 		enabled = Unpack(pf.Find(x => x.enabled));
 		
 		renderPassEvent = Unpack(pf.Find(x => x.renderPassEvent));
@@ -130,6 +134,12 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		PropertyField(maxAdditionalLights);
 		PropertyField(blurIterations);
 		PropertyField(transmittanceThreshold);
+
+		PropertyField(enableStaticLightsBake);
+		bool staticLightsBakeEnabled = enableStaticLightsBake.overrideState.boolValue && enableStaticLightsBake.value.boolValue;
+		if (staticLightsBakeEnabled)
+			PropertyField(staticLightsBakeRevision);
+
 		PropertyField(enabled);
 		
 		PropertyField(renderPassEvent);

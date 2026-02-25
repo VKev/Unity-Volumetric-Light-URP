@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -27,6 +28,18 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		public Vector3 center;
 		public float halfExtent;
 		public Color color;
+	}
+
+	private struct BakedAdditionalLightData
+	{
+		public Light light;
+		public int instanceId;
+		public float anisotropy;
+		public float scattering;
+		public float radiusSq;
+		public Vector3 position;
+		public float range;
+		public float scoreFactor;
 	}
 
 #if UNITY_6000_0_OR_NEWER
@@ -137,6 +150,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly float[] SelectedScores = new float[MaxVisibleAdditionalLights];
 	private static readonly Vector3[] SelectedLightPositions = new Vector3[MaxVisibleAdditionalLights];
 	private static readonly float[] SelectedLightRanges = new float[MaxVisibleAdditionalLights];
+	private static readonly BakedAdditionalLightData[] BakedAdditionalLights = new BakedAdditionalLightData[MaxVisibleAdditionalLights];
+	private static readonly float[] BakedLightScores = new float[MaxVisibleAdditionalLights];
+	private static readonly Dictionary<int, int> VisibleAdditionalLightIndicesByInstanceId = new Dictionary<int, int>(MaxVisibleAdditionalLights);
 	private static readonly FroxelMeta[] FroxelMetas = new FroxelMeta[FroxelCount];
 	private static readonly int[] FroxelLightIndices = new int[FroxelCount * FroxelMaxLightsPerCell];
 	private static readonly int[] FroxelCellLightCounts = new int[FroxelCount];
@@ -185,6 +201,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static int cachedLightsHash;
 	private static int cachedMainCameraFrustumPlanesHash;
 	private static int cachedFroxelHash;
+	private static int cachedStaticLightsBakeRevision;
 	private static float cachedDistance;
 	private static float cachedBaseHeight;
 	private static float cachedMaximumHeight;
@@ -197,6 +214,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static Color cachedTint;
 	private static int cachedMaxSteps;
 	private static float cachedTransmittanceThreshold;
+	private static int bakedAdditionalLightsCount;
+	private static bool hasValidStaticLightsBake;
 
 	#endregion
 
@@ -222,6 +241,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		InitializePassesIndices();
 		ResetMaterialStateCache();
+		ResetStaticLightsBakeCache();
 	}
 
 	/// <summary>
@@ -508,11 +528,28 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		bool enableMainLightContribution = fogVolume.enableMainLightContribution.value && fogVolume.scattering.value > 0.0f && mainLightIndex > -1;
 		bool enableAdditionalLightsContribution = fogVolume.enableAdditionalLightsContribution.value && additionalLightsCount > 0 && fogVolume.maxAdditionalLights.value > 0;
+		bool enableStaticLightsBake = fogVolume.enableStaticLightsBake.value;
+
+		if (!enableStaticLightsBake && hasValidStaticLightsBake)
+			ResetStaticLightsBakeCache();
+
+		if (enableStaticLightsBake)
+		{
+			int staticLightsBakeRevision = fogVolume.staticLightsBakeRevision.value;
+			if (!hasValidStaticLightsBake || cachedStaticLightsBakeRevision != staticLightsBakeRevision)
+				BakeStaticLightsData(fogVolume);
+
+			cachedStaticLightsBakeRevision = staticLightsBakeRevision;
+		}
 
 		int lightsHash = 0;
 		int effectiveAdditionalLightsCount = 0;
 		if (enableMainLightContribution || enableAdditionalLightsContribution)
-			effectiveAdditionalLightsCount = UpdateLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
+		{
+			effectiveAdditionalLightsCount = enableStaticLightsBake
+				? UpdateBakedLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash)
+				: UpdateLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
+		}
 
 		enableAdditionalLightsContribution &= effectiveAdditionalLightsCount > 0;
 
@@ -597,6 +634,248 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedFroxelHash = froxelHash;
 
 		isMaterialStateInitialized = true;
+	}
+
+	/// <summary>
+	/// Updates and selects additional lights using baked static light data.
+	/// </summary>
+	/// <param name="fogVolume"></param>
+	/// <param name="enableMainLightContribution"></param>
+	/// <param name="enableAdditionalLightsContribution"></param>
+	/// <param name="mainLightIndex"></param>
+	/// <param name="additionalLightsCount"></param>
+	/// <param name="visibleLights"></param>
+	/// <param name="cameraPosition"></param>
+	/// <param name="lightsHash"></param>
+	/// <returns></returns>
+	private static int UpdateBakedLightsParameters(VolumetricFogVolumeComponent fogVolume, bool enableMainLightContribution, bool enableAdditionalLightsContribution, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights, Vector3 cameraPosition, out int lightsHash)
+	{
+		int effectiveAdditionalLightsCount = 0;
+
+		if (enableAdditionalLightsContribution && hasValidStaticLightsBake && bakedAdditionalLightsCount > 0)
+		{
+			int maxAdditionalLights = Mathf.Clamp(fogVolume.maxAdditionalLights.value, 0, MaxVisibleAdditionalLights);
+			float fogDistance = fogVolume.distance.value;
+			bool groundEnabled = fogVolume.enableGround.overrideState && fogVolume.enableGround.value;
+			float fogMinHeight = groundEnabled ? fogVolume.groundHeight.value : float.NegativeInfinity;
+			float fogMaxHeight = fogVolume.maximumHeight.value;
+
+			BuildVisibleAdditionalLightIndexLookup(mainLightIndex, additionalLightsCount, visibleLights);
+
+			for (int i = 0; i < bakedAdditionalLightsCount; ++i)
+			{
+				BakedAdditionalLightData bakedLight = BakedAdditionalLights[i];
+				if (bakedLight.light == null || !VisibleAdditionalLightIndicesByInstanceId.TryGetValue(bakedLight.instanceId, out int additionalLightIndex))
+					continue;
+
+				float range = Mathf.Max(bakedLight.range, 0.01f);
+				Vector3 lightPosition = bakedLight.position;
+				float maxDistance = fogDistance + range;
+				float distanceSq = (lightPosition - cameraPosition).sqrMagnitude;
+				if (distanceSq > maxDistance * maxDistance)
+					continue;
+
+				float lightMinY = lightPosition.y - range;
+				float lightMaxY = lightPosition.y + range;
+				if (lightMaxY < fogMinHeight || lightMinY > fogMaxHeight)
+					continue;
+
+				float score = bakedLight.scoreFactor / Mathf.Max(distanceSq, 1.0f);
+				if (score <= 0.0f)
+					continue;
+
+				TryInsertSelectedAdditionalLight(additionalLightIndex, bakedLight.anisotropy, bakedLight.scattering, bakedLight.radiusSq, score, lightPosition, range, maxAdditionalLights, ref effectiveAdditionalLightsCount);
+			}
+		}
+
+		for (int i = 0; i < effectiveAdditionalLightsCount; ++i)
+		{
+			AdditionalLightIndices[i] = SelectedAdditionalIndices[i];
+			Anisotropies[i] = SelectedAnisotropies[i];
+			Scatterings[i] = SelectedScatterings[i];
+			RadiiSq[i] = SelectedRadiiSq[i];
+		}
+
+		if (enableMainLightContribution)
+		{
+			Anisotropies[effectiveAdditionalLightsCount] = fogVolume.anisotropy.value;
+			Scatterings[effectiveAdditionalLightsCount] = fogVolume.scattering.value;
+		}
+
+		lightsHash = ComputeLightsHash(effectiveAdditionalLightsCount, enableMainLightContribution);
+		return effectiveAdditionalLightsCount;
+	}
+
+	/// <summary>
+	/// Builds the static additional lights bake cache.
+	/// </summary>
+	/// <param name="fogVolume"></param>
+	private static void BakeStaticLightsData(VolumetricFogVolumeComponent fogVolume)
+	{
+		bakedAdditionalLightsCount = 0;
+
+		if (fogVolume == null)
+		{
+			hasValidStaticLightsBake = true;
+			return;
+		}
+
+		bool groundEnabled = fogVolume.enableGround.overrideState && fogVolume.enableGround.value;
+		float fogMinHeight = groundEnabled ? fogVolume.groundHeight.value : float.NegativeInfinity;
+		float fogMaxHeight = fogVolume.maximumHeight.value;
+
+#if UNITY_2023_1_OR_NEWER
+		Light[] sceneLights = UnityEngine.Object.FindObjectsByType<Light>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+#else
+		Light[] sceneLights = UnityEngine.Object.FindObjectsOfType<Light>();
+#endif
+
+		for (int i = 0; i < sceneLights.Length; ++i)
+		{
+			Light light = sceneLights[i];
+			if (!TryGetBakedAdditionalLightCandidate(light, fogMinHeight, fogMaxHeight, out BakedAdditionalLightData bakedLight, out float score))
+				continue;
+
+			TryInsertBakedAdditionalLight(bakedLight, score, MaxVisibleAdditionalLights, ref bakedAdditionalLightsCount);
+		}
+
+		hasValidStaticLightsBake = true;
+	}
+
+	/// <summary>
+	/// Resets static additional lights bake cache.
+	/// </summary>
+	private static void ResetStaticLightsBakeCache()
+	{
+		hasValidStaticLightsBake = false;
+		bakedAdditionalLightsCount = 0;
+		cachedStaticLightsBakeRevision = int.MinValue;
+		VisibleAdditionalLightIndicesByInstanceId.Clear();
+	}
+
+	/// <summary>
+	/// Returns whether a light can be baked for additional light volumetrics.
+	/// </summary>
+	/// <param name="light"></param>
+	/// <param name="fogMinHeight"></param>
+	/// <param name="fogMaxHeight"></param>
+	/// <param name="bakedLight"></param>
+	/// <param name="score"></param>
+	/// <returns></returns>
+	private static bool TryGetBakedAdditionalLightCandidate(Light light, float fogMinHeight, float fogMaxHeight, out BakedAdditionalLightData bakedLight, out float score)
+	{
+		bakedLight = default;
+		score = 0.0f;
+
+		if (light == null || !light.enabled || !light.gameObject.activeInHierarchy)
+			return false;
+
+		if (light.type != LightType.Point && light.type != LightType.Spot)
+			return false;
+
+		if (!light.TryGetComponent(out VolumetricAdditionalLight volumetricLight) || !volumetricLight.enabled || !volumetricLight.gameObject.activeInHierarchy)
+			return false;
+
+		float scattering = volumetricLight.Scattering;
+		if (scattering <= MinAdditionalLightScattering || light.intensity <= MinAdditionalLightIntensity)
+			return false;
+
+		float range = Mathf.Max(light.range, 0.01f);
+		Vector3 lightPosition = light.transform.position;
+		float lightMinY = lightPosition.y - range;
+		float lightMaxY = lightPosition.y + range;
+		if (lightMaxY < fogMinHeight || lightMinY > fogMaxHeight)
+			return false;
+
+		float scoreFactor = scattering * light.intensity * (range * range);
+		if (light.type == LightType.Spot)
+		{
+			float spotAngleCos = Mathf.Cos(0.5f * Mathf.Deg2Rad * light.spotAngle);
+			scoreFactor *= Mathf.Max(0.25f, spotAngleCos);
+		}
+
+		if (scoreFactor <= 0.0f)
+			return false;
+
+		bakedLight.light = light;
+		bakedLight.instanceId = light.GetInstanceID();
+		bakedLight.anisotropy = volumetricLight.Anisotropy;
+		bakedLight.scattering = scattering;
+		bakedLight.radiusSq = volumetricLight.Radius * volumetricLight.Radius;
+		bakedLight.position = lightPosition;
+		bakedLight.range = range;
+		bakedLight.scoreFactor = scoreFactor;
+		score = scoreFactor;
+		return true;
+	}
+
+	/// <summary>
+	/// Inserts baked light data into a compact list of strongest candidates.
+	/// </summary>
+	/// <param name="bakedLight"></param>
+	/// <param name="score"></param>
+	/// <param name="maxBakedLights"></param>
+	/// <param name="bakedLightsCount"></param>
+	private static void TryInsertBakedAdditionalLight(in BakedAdditionalLightData bakedLight, float score, int maxBakedLights, ref int bakedLightsCount)
+	{
+		if (maxBakedLights <= 0)
+			return;
+
+		int selectedIndex = -1;
+		if (bakedLightsCount < maxBakedLights)
+		{
+			selectedIndex = bakedLightsCount++;
+		}
+		else
+		{
+			float minScore = BakedLightScores[0];
+			int minScoreIndex = 0;
+			for (int i = 1; i < bakedLightsCount; ++i)
+			{
+				if (BakedLightScores[i] < minScore)
+				{
+					minScore = BakedLightScores[i];
+					minScoreIndex = i;
+				}
+			}
+
+			if (score <= minScore)
+				return;
+
+			selectedIndex = minScoreIndex;
+		}
+
+		BakedAdditionalLights[selectedIndex] = bakedLight;
+		BakedLightScores[selectedIndex] = score;
+	}
+
+	/// <summary>
+	/// Builds the lookup table from visible light instance ids to current additional light indices.
+	/// </summary>
+	/// <param name="mainLightIndex"></param>
+	/// <param name="additionalLightsCount"></param>
+	/// <param name="visibleLights"></param>
+	private static void BuildVisibleAdditionalLightIndexLookup(int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights)
+	{
+		VisibleAdditionalLightIndicesByInstanceId.Clear();
+		if (additionalLightsCount <= 0 || visibleLights.Length <= 0)
+			return;
+
+		int lastIndex = Mathf.Min(visibleLights.Length - 1, LightsParametersLength - 1);
+		int additionalLightSlotIndex = 0;
+
+		for (int i = 0; i <= lastIndex && additionalLightSlotIndex < additionalLightsCount; ++i)
+		{
+			if (i == mainLightIndex)
+				continue;
+
+			int additionalLightIndex = additionalLightSlotIndex++;
+			Light light = visibleLights[i].light;
+			if (light == null)
+				continue;
+
+			VisibleAdditionalLightIndicesByInstanceId[light.GetInstanceID()] = additionalLightIndex;
+		}
 	}
 
 	/// <summary>
@@ -1665,6 +1944,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		ReleaseDebugSolidCubeResources();
 		ReleaseFroxelBuffers();
 		ResetMaterialStateCache();
+		ResetStaticLightsBakeCache();
 	}
 
 	#endregion
