@@ -10,6 +10,8 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 
 	[Tooltip("3D texture containing baked volumetric lighting in RGB.")]
 	[SerializeField] private Texture3D lightingTexture;
+	[Tooltip("3D texture containing baked dominant lighting direction in RGB.")]
+	[SerializeField] private Texture3D directionTexture;
 	[Tooltip("World-space center of the baked volume bounds.")]
 	[SerializeField] private Vector3 boundsCenter = new Vector3(0.0f, 8.0f, 0.0f);
 	[Tooltip("World-space size of the baked volume bounds.")]
@@ -36,6 +38,7 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	#region Public Attributes
 
 	public Texture3D LightingTexture => lightingTexture;
+	public Texture3D DirectionTexture => directionTexture;
 	public Vector3 BoundsCenter => boundsCenter;
 	public Vector3 BoundsSize => boundsSize;
 	public int ResolutionX => resolutionX;
@@ -63,6 +66,11 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	public void SetLightingTexture(Texture3D texture)
 	{
 		lightingTexture = texture;
+	}
+
+	public void SetDirectionTexture(Texture3D texture)
+	{
+		directionTexture = texture;
 	}
 
 	public void SetBakedLightsCount(int count)

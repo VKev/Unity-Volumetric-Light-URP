@@ -35,6 +35,8 @@ float _BakedVolumetricFogIntensity;
 
 TEXTURE3D(_BakedVolumetricFogLightingTex);
 SAMPLER(sampler_BakedVolumetricFogLightingTex);
+TEXTURE3D(_BakedVolumetricFogDirectionTex);
+SAMPLER(sampler_BakedVolumetricFogDirectionTex);
 
 float _Anisotropies[MAX_VISIBLE_LIGHTS + 1];
 float _Scatterings[MAX_VISIBLE_LIGHTS + 1];
@@ -138,15 +140,37 @@ float3 GetStepAdaptiveProbeVolumeEvaluation(float2 uv, float3 posWS, float densi
 }
 
 // Gets the baked volumetric lighting evaluation at one raymarch step.
-float3 GetStepBakedLightingColor(float3 currPosWS, float density)
+float3 GetStepBakedLightingColor(float3 currPosWS, float3 rd, float density)
 {
 #if _BAKED_VOLUMETRIC_FOG_ENABLED
+    const float isotropicPhase = 0.0795774715;
     float3 bakedUv = (currPosWS - _BakedVolumetricFogBoundsMin.xyz) * _BakedVolumetricFogBoundsSizeInv.xyz;
     UNITY_BRANCH
     if (any(bakedUv < 0.0) || any(bakedUv > 1.0))
         return float3(0.0, 0.0, 0.0);
 
-    float3 bakedColor = SAMPLE_TEXTURE3D(_BakedVolumetricFogLightingTex, sampler_BakedVolumetricFogLightingTex, bakedUv).rgb;
+    float4 bakedLighting = SAMPLE_TEXTURE3D(_BakedVolumetricFogLightingTex, sampler_BakedVolumetricFogLightingTex, bakedUv);
+    float3 bakedColor = bakedLighting.rgb;
+
+#if _BAKED_VOLUMETRIC_DIRECTIONAL_PHASE
+    float anisotropy = bakedLighting.a * 2.0 - 1.0;
+    float3 bakedDirection = SAMPLE_TEXTURE3D(_BakedVolumetricFogDirectionTex, sampler_BakedVolumetricFogDirectionTex, bakedUv).rgb * 2.0 - 1.0;
+    float dirLengthSq = dot(bakedDirection, bakedDirection);
+    UNITY_BRANCH
+    if (dirLengthSq > 0.000001)
+    {
+        bakedDirection *= rsqrt(dirLengthSq);
+        float phase = CornetteShanksPhaseFunction(anisotropy, dot(rd, bakedDirection));
+        bakedColor *= phase;
+    }
+    else
+    {
+        bakedColor *= isotropicPhase;
+    }
+#else
+    bakedColor *= isotropicPhase;
+#endif
+
     return bakedColor * (_BakedVolumetricFogIntensity * density);
 #else
     return float3(0.0, 0.0, 0.0);
@@ -325,7 +349,7 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         transmittance *= stepAttenuation;
 
         half3 apvColor = (half3)GetStepAdaptiveProbeVolumeEvaluation(uv, currPosWS, density);
-        half3 bakedColor = (half3)GetStepBakedLightingColor(currPosWS, density);
+        half3 bakedColor = (half3)GetStepBakedLightingColor(currPosWS, rd, density);
         half3 mainLightColor = (half3)GetStepMainLightColor(currPosWS, phaseMainLight, density);
         half3 additionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density);
         

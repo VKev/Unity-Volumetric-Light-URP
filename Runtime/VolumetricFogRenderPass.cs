@@ -91,6 +91,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int MainCameraFrustumPlanesId = Shader.PropertyToID("_MainCameraFrustumPlanes");
 	private static readonly int DebugColorId = Shader.PropertyToID("_Color");
 	private static readonly int BakedVolumetricFogLightingTextureId = Shader.PropertyToID("_BakedVolumetricFogLightingTex");
+	private static readonly int BakedVolumetricFogDirectionTextureId = Shader.PropertyToID("_BakedVolumetricFogDirectionTex");
 	private static readonly int BakedVolumetricFogBoundsMinId = Shader.PropertyToID("_BakedVolumetricFogBoundsMin");
 	private static readonly int BakedVolumetricFogBoundsSizeInvId = Shader.PropertyToID("_BakedVolumetricFogBoundsSizeInv");
 	private static readonly int BakedVolumetricFogIntensityId = Shader.PropertyToID("_BakedVolumetricFogIntensity");
@@ -181,6 +182,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static bool cachedMainLightContributionEnabled;
 	private static bool cachedAdditionalLightsContributionEnabled;
 	private static bool cachedBakedVolumetricLightingEnabled;
+	private static bool cachedBakedDirectionalPhaseEnabled;
 	private static bool cachedSceneViewMainCameraFrustumMaskEnabled;
 	private static bool cachedFroxelClusteredLightsEnabled;
 #if UNITY_2023_1_OR_NEWER
@@ -637,6 +639,17 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	{
 		int dataHash = 0;
 		float safeIntensity = enabled ? Mathf.Max(0.0f, intensity) : 0.0f;
+		bool hasDirectionalTexture = enabled && bakedLightingData.DirectionTexture != null;
+		if (!isMaterialStateInitialized || cachedBakedDirectionalPhaseEnabled != hasDirectionalTexture)
+		{
+			if (hasDirectionalTexture)
+				material.EnableKeyword("_BAKED_VOLUMETRIC_DIRECTIONAL_PHASE");
+			else
+				material.DisableKeyword("_BAKED_VOLUMETRIC_DIRECTIONAL_PHASE");
+
+			cachedBakedDirectionalPhaseEnabled = hasDirectionalTexture;
+		}
+
 		if (enabled)
 		{
 			Vector3 boundsSize = bakedLightingData.BoundsSize;
@@ -648,6 +661,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			if (!isMaterialStateInitialized || dataHash != cachedBakedVolumetricLightingHash)
 			{
 				material.SetTexture(BakedVolumetricFogLightingTextureId, bakedLightingData.LightingTexture);
+				material.SetTexture(BakedVolumetricFogDirectionTextureId, bakedLightingData.DirectionTexture);
 				material.SetVector(BakedVolumetricFogBoundsMinId, new Vector4(boundsMin.x, boundsMin.y, boundsMin.z, 0.0f));
 				material.SetVector(BakedVolumetricFogBoundsSizeInvId, new Vector4(boundsSizeInv.x, boundsSizeInv.y, boundsSizeInv.z, 0.0f));
 				cachedBakedVolumetricLightingHash = dataHash;
@@ -656,6 +670,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		else if (!isMaterialStateInitialized || cachedBakedVolumetricLightingHash != 0)
 		{
 			material.SetTexture(BakedVolumetricFogLightingTextureId, null);
+			material.SetTexture(BakedVolumetricFogDirectionTextureId, null);
 			material.SetVector(BakedVolumetricFogBoundsMinId, Vector4.zero);
 			material.SetVector(BakedVolumetricFogBoundsSizeInvId, Vector4.zero);
 			cachedBakedVolumetricLightingHash = 0;
@@ -678,6 +693,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		{
 			int hash = 17;
 			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedLightingData != null && bakedLightingData.LightingTexture != null ? bakedLightingData.LightingTexture.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedLightingData != null && bakedLightingData.DirectionTexture != null ? bakedLightingData.DirectionTexture.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.BakedLightsCount : 0);
 			hash = (hash * 31) + intensity.GetHashCode();
 			hash = (hash * 31) + boundsMin.GetHashCode();
 			hash = (hash * 31) + boundsSizeInv.GetHashCode();
@@ -1634,6 +1652,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedMainLightContributionEnabled = false;
 		cachedAdditionalLightsContributionEnabled = false;
 		cachedBakedVolumetricLightingEnabled = false;
+		cachedBakedDirectionalPhaseEnabled = false;
 		cachedSceneViewMainCameraFrustumMaskEnabled = false;
 		cachedFroxelClusteredLightsEnabled = false;
 #if UNITY_2023_1_OR_NEWER

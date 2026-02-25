@@ -25,9 +25,17 @@ internal static class VolumetricFogBakedDataBaker
 		public float invRangeSq;
 		public float radiusSq;
 		public float scattering;
+		public float anisotropy;
 		public float spotScale;
 		public float spotOffset;
 		public bool castShadows;
+	}
+
+	private struct BakedVoxelSample
+	{
+		public Vector3 color;
+		public Vector3 dominantDirection;
+		public float anisotropy;
 	}
 
 	/// <summary>
@@ -81,6 +89,7 @@ internal static class VolumetricFogBakedDataBaker
 
 		Undo.RecordObject(bakedData, "Clear Volumetric Fog Baked Texture");
 		bakedData.SetLightingTexture(null);
+		bakedData.SetDirectionTexture(null);
 		bakedData.SetBakedLightsCount(0);
 		EditorUtility.SetDirty(bakedData);
 		AssetDatabase.SaveAssets();
@@ -110,7 +119,8 @@ internal static class VolumetricFogBakedDataBaker
 		int resolutionY = Mathf.Clamp(bakedData.ResolutionY, 4, 256);
 		int resolutionZ = Mathf.Clamp(bakedData.ResolutionZ, 4, 256);
 		int voxelCount = resolutionX * resolutionY * resolutionZ;
-		Color[] bakedColors = new Color[voxelCount];
+		Color[] bakedLightingColors = new Color[voxelCount];
+		Color[] bakedDirectionColors = new Color[voxelCount];
 
 		Vector3 boundsSize = bakedData.BoundsSize;
 		Vector3 boundsMin = bakedData.BoundsCenter - (boundsSize * 0.5f);
@@ -152,8 +162,12 @@ internal static class VolumetricFogBakedDataBaker
 						float positionX = boundsMin.x + vx * boundsSize.x;
 						Vector3 positionWS = new Vector3(positionX, positionY, positionZ);
 
-						Vector3 bakedColor = EvaluateBakedLightingAtPosition(positionWS, bakedLights, occlusionSettings);
-						bakedColors[rowOffset + x] = new Color(bakedColor.x, bakedColor.y, bakedColor.z, 1.0f);
+						BakedVoxelSample sample = EvaluateBakedLightingAtPosition(positionWS, bakedLights, occlusionSettings);
+						int voxelIndex = rowOffset + x;
+						float anisotropyEncoded = Mathf.Clamp01(sample.anisotropy * 0.5f + 0.5f);
+						Vector3 directionEncoded = sample.dominantDirection * 0.5f + Vector3.one * 0.5f;
+						bakedLightingColors[voxelIndex] = new Color(sample.color.x, sample.color.y, sample.color.z, anisotropyEncoded);
+						bakedDirectionColors[voxelIndex] = new Color(directionEncoded.x, directionEncoded.y, directionEncoded.z, 1.0f);
 					}
 				}
 			}
@@ -163,17 +177,22 @@ internal static class VolumetricFogBakedDataBaker
 			EditorUtility.ClearProgressBar();
 		}
 
-		Texture3D bakedTexture = GetOrCreateBakedTextureAsset(bakedData, resolutionX, resolutionY, resolutionZ);
-		if (bakedTexture == null)
+		Texture3D bakedLightingTexture = GetOrCreateBakedTextureAsset(bakedData, resolutionX, resolutionY, resolutionZ, isDirectionTexture: false);
+		Texture3D bakedDirectionTexture = GetOrCreateBakedTextureAsset(bakedData, resolutionX, resolutionY, resolutionZ, isDirectionTexture: true);
+		if (bakedLightingTexture == null || bakedDirectionTexture == null)
 			return false;
 
-		bakedTexture.SetPixels(bakedColors);
-		bakedTexture.Apply(false, false);
+		bakedLightingTexture.SetPixels(bakedLightingColors);
+		bakedLightingTexture.Apply(false, false);
+		bakedDirectionTexture.SetPixels(bakedDirectionColors);
+		bakedDirectionTexture.Apply(false, false);
 
 		Undo.RecordObject(bakedData, "Bake Volumetric Fog Lighting");
-		bakedData.SetLightingTexture(bakedTexture);
+		bakedData.SetLightingTexture(bakedLightingTexture);
+		bakedData.SetDirectionTexture(bakedDirectionTexture);
 		bakedData.SetBakedLightsCount(bakedLightsCount);
-		EditorUtility.SetDirty(bakedTexture);
+		EditorUtility.SetDirty(bakedLightingTexture);
+		EditorUtility.SetDirty(bakedDirectionTexture);
 		EditorUtility.SetDirty(bakedData);
 
 		AssetDatabase.SaveAssets();
@@ -182,9 +201,9 @@ internal static class VolumetricFogBakedDataBaker
 		return true;
 	}
 
-	private static Texture3D GetOrCreateBakedTextureAsset(VolumetricFogBakedData bakedData, int resolutionX, int resolutionY, int resolutionZ)
+	private static Texture3D GetOrCreateBakedTextureAsset(VolumetricFogBakedData bakedData, int resolutionX, int resolutionY, int resolutionZ, bool isDirectionTexture)
 	{
-		Texture3D texture = bakedData.LightingTexture;
+		Texture3D texture = isDirectionTexture ? bakedData.DirectionTexture : bakedData.LightingTexture;
 		bool needsCreate = texture == null
 			|| texture.width != resolutionX
 			|| texture.height != resolutionY
@@ -193,8 +212,11 @@ internal static class VolumetricFogBakedDataBaker
 
 		if (needsCreate)
 		{
+			if (texture != null)
+				UnityEngine.Object.DestroyImmediate(texture, true);
+
 			texture = new Texture3D(resolutionX, resolutionY, resolutionZ, TextureFormat.RGBAHalf, false, true);
-			texture.name = "VolumetricFogBakedLighting";
+			texture.name = isDirectionTexture ? "VolumetricFogBakedDirection" : "VolumetricFogBakedLighting";
 			texture.wrapMode = TextureWrapMode.Clamp;
 			texture.filterMode = FilterMode.Bilinear;
 			texture.anisoLevel = 0;
@@ -243,22 +265,26 @@ internal static class VolumetricFogBakedDataBaker
 			Vector3 color = new Vector3(lightColorLinear.r, lightColorLinear.g, lightColorLinear.b);
 
 			float scattering;
+			float anisotropy;
 			if (light.type == LightType.Directional)
 			{
 				if (mainLightScattering <= 0.0001f)
 					continue;
 
 				scattering = mainLightScattering;
+				anisotropy = Mathf.Clamp(fogVolume.anisotropy.value, -0.99f, 0.99f);
 				color = Vector3.Scale(color, mainLightTint);
 			}
 			else if (light.TryGetComponent(out VolumetricAdditionalLight volumetricAdditionalLight))
 			{
 				scattering = Mathf.Max(0.0f, volumetricAdditionalLight.Scattering);
+				anisotropy = Mathf.Clamp(volumetricAdditionalLight.Anisotropy, -0.99f, 0.99f);
 			}
 			else
 			{
 				// Allow baked contribution for point/spot lights without VolumetricAdditionalLight using a default scattering.
 				scattering = 1.0f;
+				anisotropy = 0.25f;
 				defaultAdditionalScatteringLightsCount++;
 			}
 
@@ -273,6 +299,7 @@ internal static class VolumetricFogBakedDataBaker
 				direction = light.transform.forward.normalized,
 				rangeSq = Mathf.Max(light.range * light.range, 0.0001f),
 				scattering = scattering,
+				anisotropy = anisotropy,
 				invRangeSq = 0.0f,
 				radiusSq = 0.04f,
 				spotScale = 0.0f,
@@ -310,59 +337,94 @@ internal static class VolumetricFogBakedDataBaker
 		return bakedLights;
 	}
 
-	private static Vector3 EvaluateBakedLightingAtPosition(Vector3 positionWS, List<BakedLightSample> bakedLights, in BakedOcclusionSettings occlusionSettings)
+	private static BakedVoxelSample EvaluateBakedLightingAtPosition(Vector3 positionWS, List<BakedLightSample> bakedLights, in BakedOcclusionSettings occlusionSettings)
 	{
-		const float AveragePhase = 0.0795774715f; // 1 / (4 * PI), view-independent phase approximation.
 		Vector3 accumulatedColor = Vector3.zero;
+		Vector3 weightedDirection = Vector3.zero;
+		float weightedAnisotropy = 0.0f;
+		float totalWeight = 0.0f;
 
 		for (int i = 0; i < bakedLights.Count; ++i)
 		{
 			BakedLightSample light = bakedLights[i];
+			Vector3 directionToLight = Vector3.forward;
+			float attenuation = 1.0f;
 
 			if (light.type == LightType.Directional)
 			{
 				if (IsOccluded(positionWS, light, occlusionSettings))
 					continue;
 
-				accumulatedColor += light.color * (light.scattering * AveragePhase);
-				continue;
+				directionToLight = -light.direction.normalized;
+				attenuation = 1.0f;
 			}
-
-			Vector3 toPoint = positionWS - light.position;
-			float distanceSq = Vector3.Dot(toPoint, toPoint);
-			if (distanceSq >= light.rangeSq)
-				continue;
-
-			if (IsOccluded(positionWS, light, occlusionSettings))
-				continue;
-
-			// Approximate URP distance attenuation to avoid broad over-bright baked punctual contribution.
-			float distanceAttenuation = 1.0f / Mathf.Max(distanceSq, 0.0001f);
-			float smoothFactor = 1.0f - (distanceSq * light.invRangeSq);
-			smoothFactor = Mathf.Clamp01(smoothFactor);
-			smoothFactor *= smoothFactor;
-			float attenuation = distanceAttenuation * smoothFactor;
-
-			// Match runtime smoothing near light origin to reduce noise and energy spike.
-			float radiusSq = Mathf.Max(light.radiusSq, 0.000001f);
-			float radialFade = Mathf.Clamp01(distanceSq / radiusSq);
-			radialFade = radialFade * radialFade * (3.0f - (2.0f * radialFade));
-			radialFade *= radialFade;
-			attenuation *= radialFade;
-
-			if (light.type == LightType.Spot)
+			else
 			{
-				float invDistance = 1.0f / Mathf.Sqrt(Mathf.Max(distanceSq, 0.000001f));
-				Vector3 directionToPoint = toPoint * invDistance;
-				float cosAngle = Vector3.Dot(light.direction, directionToPoint);
-				float spotAttenuation = Mathf.Clamp01(cosAngle * light.spotScale + light.spotOffset);
-				attenuation *= spotAttenuation * spotAttenuation;
+				Vector3 toPoint = positionWS - light.position;
+				float distanceSq = Vector3.Dot(toPoint, toPoint);
+				if (distanceSq >= light.rangeSq)
+					continue;
+
+				if (IsOccluded(positionWS, light, occlusionSettings))
+					continue;
+
+				float distance = Mathf.Sqrt(Mathf.Max(distanceSq, 0.000001f));
+				directionToLight = (light.position - positionWS) / distance;
+
+				// Approximate URP distance attenuation to avoid broad over-bright baked punctual contribution.
+				float distanceAttenuation = 1.0f / Mathf.Max(distanceSq, 0.0001f);
+				float rangeFactor = distanceSq * light.invRangeSq;
+				float smoothFactor = 1.0f - (rangeFactor * rangeFactor);
+				smoothFactor = Mathf.Clamp01(smoothFactor);
+				smoothFactor *= smoothFactor;
+				attenuation = distanceAttenuation * smoothFactor;
+
+				// Match runtime smoothing near light origin to reduce noise and energy spike.
+				float radiusSq = Mathf.Max(light.radiusSq, 0.000001f);
+				float radialFade = Mathf.Clamp01(distanceSq / radiusSq);
+				radialFade = radialFade * radialFade * (3.0f - (2.0f * radialFade));
+				radialFade *= radialFade;
+				attenuation *= radialFade;
+
+				if (light.type == LightType.Spot)
+				{
+					float cosAngle = Vector3.Dot(light.direction, -directionToLight);
+					float spotAttenuation = Mathf.Clamp01(cosAngle * light.spotScale + light.spotOffset);
+					attenuation *= spotAttenuation * spotAttenuation;
+				}
 			}
 
-			accumulatedColor += light.color * (attenuation * light.scattering * AveragePhase);
+			Vector3 contribution = light.color * (attenuation * light.scattering);
+			accumulatedColor += contribution;
+
+			float weight = Mathf.Max(0.000001f, GetLuminance(contribution));
+			weightedDirection += directionToLight * weight;
+			weightedAnisotropy += light.anisotropy * weight;
+			totalWeight += weight;
 		}
 
-		return accumulatedColor;
+		BakedVoxelSample sample = new BakedVoxelSample
+		{
+			color = accumulatedColor,
+			dominantDirection = Vector3.forward,
+			anisotropy = 0.0f
+		};
+
+		if (totalWeight > 0.000001f)
+		{
+			Vector3 normalizedDirection = weightedDirection.normalized;
+			if (normalizedDirection.sqrMagnitude > 0.000001f)
+				sample.dominantDirection = normalizedDirection;
+
+			sample.anisotropy = Mathf.Clamp(weightedAnisotropy / totalWeight, -0.99f, 0.99f);
+		}
+
+		return sample;
+	}
+
+	private static float GetLuminance(Vector3 color)
+	{
+		return color.x * 0.2126f + color.y * 0.7152f + color.z * 0.0722f;
 	}
 
 	private static bool IsOccluded(Vector3 positionWS, in BakedLightSample light, in BakedOcclusionSettings settings)
