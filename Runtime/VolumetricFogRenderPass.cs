@@ -68,6 +68,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 	private static readonly int DownsampledCameraDepthTextureId = Shader.PropertyToID("_DownsampledCameraDepthTexture");
 	private static readonly int VolumetricFogTextureId = Shader.PropertyToID("_VolumetricFogTexture");
+	private static readonly int SceneViewMainCameraFrustumMaskEnabledId = Shader.PropertyToID("_SceneViewMainCameraFrustumMaskEnabled");
+	private static readonly int MainCameraFrustumPlanesId = Shader.PropertyToID("_MainCameraFrustumPlanes");
 
 	private static readonly int FrameCountId = Shader.PropertyToID("_FrameCount");
 	private static readonly int CustomAdditionalLightsCountId = Shader.PropertyToID("_CustomAdditionalLightsCount");
@@ -110,6 +112,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private RTHandle volumetricFogUpsampleCompositionRTHandle;
 
 	private ProfilingSampler downsampleDepthProfilingSampler;
+	private readonly Vector4[] mainCameraFrustumPlanes = new Vector4[6];
+	private bool sceneViewMainCameraFrustumMaskEnabled;
 
 	#endregion
 
@@ -146,6 +150,25 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		volumetricFogHorizontalBlurPassIndex = volumetricFogMaterial.FindPass("VolumetricFogHorizontalBlur");
 		volumetricFogVerticalBlurPassIndex = volumetricFogMaterial.FindPass("VolumetricFogVerticalBlur");
 		volumetricFogUpsampleCompositionPassIndex = volumetricFogMaterial.FindPass("VolumetricFogUpsampleComposition");
+	}
+
+	/// <summary>
+	/// Enables or disables scene view masking to only apply fog in the main camera frustum.
+	/// </summary>
+	/// <param name="enableMask"></param>
+	/// <param name="mainCamera"></param>
+	public void SetupSceneViewMainCameraMask(bool enableMask, Camera mainCamera)
+	{
+		sceneViewMainCameraFrustumMaskEnabled = enableMask && mainCamera != null;
+		if (!sceneViewMainCameraFrustumMaskEnabled)
+			return;
+
+		Plane[] frustumPlanes = GeometryUtility.CalculateFrustumPlanes(mainCamera);
+		for (int i = 0; i < mainCameraFrustumPlanes.Length; ++i)
+		{
+			Plane plane = frustumPlanes[i];
+			mainCameraFrustumPlanes[i] = new Vector4(plane.normal.x, plane.normal.y, plane.normal.z, plane.distance);
+		}
 	}
 
 	#endregion
@@ -197,6 +220,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
 	{
 		CommandBuffer cmd = CommandBufferPool.Get();
+		ApplySceneViewMainCameraMaskParameters(volumetricFogMaterial);
 
 		using (new ProfilingScope(cmd, downsampleDepthProfilingSampler))
 		{
@@ -244,6 +268,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
 		UniversalLightData lightData = frameData.Get<UniversalLightData>();
 		UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
+		ApplySceneViewMainCameraMaskParameters(volumetricFogMaterial);
 
 		CreateRenderGraphTextures(renderGraph, cameraData, out TextureHandle downsampledCameraDepthTarget, out TextureHandle volumetricFogRenderTarget, out TextureHandle volumetricFogBlurRenderTarget, out TextureHandle volumetricFogUpsampleCompositionTarget);
 
@@ -318,6 +343,17 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	#endregion
 
 	#region Methods
+
+	/// <summary>
+	/// Updates the material parameters that control scene view masking to the main camera frustum.
+	/// </summary>
+	/// <param name="material"></param>
+	private void ApplySceneViewMainCameraMaskParameters(Material material)
+	{
+		material.SetInteger(SceneViewMainCameraFrustumMaskEnabledId, sceneViewMainCameraFrustumMaskEnabled ? 1 : 0);
+		if (sceneViewMainCameraFrustumMaskEnabled)
+			material.SetVectorArray(MainCameraFrustumPlanesId, mainCameraFrustumPlanes);
+	}
 
 	/// <summary>
 	/// Updates the volumetric fog material parameters.

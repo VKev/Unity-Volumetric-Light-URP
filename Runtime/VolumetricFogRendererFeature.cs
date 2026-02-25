@@ -21,6 +21,8 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	[SerializeField] private bool renderInOverlayCameras;
 	[Tooltip("Render volumetric fog only for the camera tagged MainCamera.")]
 	[SerializeField] private bool renderOnlyMainCameraView;
+	[Tooltip("In Scene View, render fog only inside the Main Camera frustum so you can preview the game camera region.")]
+	[SerializeField] private bool renderMainCameraRegionInSceneView;
 
 	private Material downsampleDepthMaterial;
 	private Material volumetricFogMaterial;
@@ -48,11 +50,13 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// <param name="renderingData"></param>
 	public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
 	{
+		bool shouldPreviewMainCameraRegionInSceneView = ShouldPreviewMainCameraRegionInSceneView(renderingData.cameraData);
 		bool isPostProcessEnabled = renderingData.postProcessingEnabled && renderingData.cameraData.postProcessEnabled;
-		bool shouldAddVolumetricFogRenderPass = isPostProcessEnabled && ShouldAddVolumetricFogRenderPass(renderingData.cameraData);
+		bool shouldAddVolumetricFogRenderPass = isPostProcessEnabled && ShouldAddVolumetricFogRenderPass(renderingData.cameraData, shouldPreviewMainCameraRegionInSceneView);
 		
 		if (shouldAddVolumetricFogRenderPass)
 		{
+			volumetricFogRenderPass.SetupSceneViewMainCameraMask(shouldPreviewMainCameraRegionInSceneView, Camera.main);
 			volumetricFogRenderPass.renderPassEvent = GetRenderPassEvent();
 			volumetricFogRenderPass.ConfigureInput(ScriptableRenderPassInput.Depth);
 			renderer.EnqueuePass(volumetricFogRenderPass);
@@ -107,8 +111,9 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// Gets whether the volumetric fog render pass should be enqueued to the renderer.
 	/// </summary>
 	/// <param name="cameraData"></param>
+	/// <param name="shouldPreviewMainCameraRegionInSceneView"></param>
 	/// <returns></returns>
-	private bool ShouldAddVolumetricFogRenderPass(CameraData cameraData)
+	private bool ShouldAddVolumetricFogRenderPass(CameraData cameraData, bool shouldPreviewMainCameraRegionInSceneView)
 	{
 		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
 		CameraType cameraType = cameraData.cameraType;
@@ -119,12 +124,25 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 
 		bool isVolumeOk = fogVolume != null && fogVolume.IsActive();
 		bool isCameraOk = cameraType != CameraType.Preview && cameraType != CameraType.Reflection;
-		isCameraOk &= renderInSceneView || !isSceneViewCamera;
+		isCameraOk &= renderInSceneView || !isSceneViewCamera || shouldPreviewMainCameraRegionInSceneView;
 		isCameraOk &= renderInOverlayCameras || !isOverlayCamera;
-		isCameraOk &= !renderOnlyMainCameraView || isMainCamera;
+		isCameraOk &= !renderOnlyMainCameraView || isMainCamera || shouldPreviewMainCameraRegionInSceneView;
 		bool areResourcesOk = ValidateResourcesForVolumetricFogRenderPass(false);
 
 		return isActive && isVolumeOk && isCameraOk && areResourcesOk;
+	}
+
+	/// <summary>
+	/// Gets whether scene view should preview volumetric fog only in the main camera frustum.
+	/// </summary>
+	/// <param name="cameraData"></param>
+	/// <returns></returns>
+	private bool ShouldPreviewMainCameraRegionInSceneView(CameraData cameraData)
+	{
+		if (!renderMainCameraRegionInSceneView || cameraData.cameraType != CameraType.SceneView)
+			return false;
+
+		return Camera.main != null;
 	}
 
 	/// <summary>

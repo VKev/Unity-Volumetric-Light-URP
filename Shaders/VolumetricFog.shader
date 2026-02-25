@@ -133,13 +133,41 @@ Shader "Hidden/VolumetricFog"
 
             TEXTURE2D_X(_VolumetricFogTexture);
             SAMPLER(sampler_BlitTexture);
+            int _SceneViewMainCameraFrustumMaskEnabled;
+            float4 _MainCameraFrustumPlanes[6];
+
+            bool IsInsideMainCameraFrustum(float3 positionWS)
+            {
+                UNITY_UNROLL
+                for (int i = 0; i < 6; ++i)
+                {
+                    if (dot(_MainCameraFrustumPlanes[i], float4(positionWS, 1.0)) < 0.0)
+                        return false;
+                }
+
+                return true;
+            }
 
             float4 Frag(Varyings input) : SV_Target
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
 
-                float4 volumetricFog = DepthAwareUpsample(input.texcoord, _VolumetricFogTexture);
                 float4 cameraColor = SAMPLE_TEXTURE2D_X(_BlitTexture, sampler_BlitTexture, input.texcoord);
+                UNITY_BRANCH
+                if (_SceneViewMainCameraFrustumMaskEnabled > 0)
+                {
+                    float depth = SampleSceneDepth(input.texcoord);
+#if !UNITY_REVERSED_Z
+                    depth = lerp(UNITY_NEAR_CLIP_VALUE, 1.0, depth);
+#endif
+                    float3 positionWS = ComputeWorldSpacePosition(input.texcoord, depth, UNITY_MATRIX_I_VP);
+
+                    UNITY_BRANCH
+                    if (!IsInsideMainCameraFrustum(positionWS))
+                        return cameraColor;
+                }
+
+                float4 volumetricFog = DepthAwareUpsample(input.texcoord, _VolumetricFogTexture);
 
                 return float4(cameraColor.rgb * volumetricFog.a + volumetricFog.rgb, cameraColor.a);
             }
@@ -181,13 +209,41 @@ Shader "Hidden/VolumetricFog"
 
             TEXTURE2D_X(_VolumetricFogTexture);
             SAMPLER(sampler_BlitTexture);
+            int _SceneViewMainCameraFrustumMaskEnabled;
+            float4 _MainCameraFrustumPlanes[6];
+
+            bool IsInsideMainCameraFrustum(float3 positionWS)
+            {
+                UNITY_UNROLL
+                for (int i = 0; i < 6; ++i)
+                {
+                    if (dot(_MainCameraFrustumPlanes[i], float4(positionWS, 1.0)) < 0.0)
+                        return false;
+                }
+
+                return true;
+            }
 
             float4 Frag(Varyings input) : SV_Target
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
 
-                float4 volumetricFog = DepthAwareUpsample(input.texcoord, _VolumetricFogTexture);
                 float4 cameraColor = SAMPLE_TEXTURE2D_X(_BlitTexture, sampler_BlitTexture, input.texcoord);
+                UNITY_BRANCH
+                if (_SceneViewMainCameraFrustumMaskEnabled > 0)
+                {
+                    float depth = SampleSceneDepth(input.texcoord);
+#if !UNITY_REVERSED_Z
+                    depth = lerp(UNITY_NEAR_CLIP_VALUE, 1.0, depth);
+#endif
+                    float3 positionWS = ComputeWorldSpacePosition(input.texcoord, depth, UNITY_MATRIX_I_VP);
+
+                    UNITY_BRANCH
+                    if (!IsInsideMainCameraFrustum(positionWS))
+                        return cameraColor;
+                }
+
+                float4 volumetricFog = DepthAwareUpsample(input.texcoord, _VolumetricFogTexture);
 
                 return float4(cameraColor.rgb * volumetricFog.a + volumetricFog.rgb, cameraColor.a);
             }
