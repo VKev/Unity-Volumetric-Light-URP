@@ -55,6 +55,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		public VolumetricFogVolumeComponent fogVolume;
 		public Vector3 cameraPosition;
 		public Camera camera;
+		public bool debugRestrictToMainCameraFrustum;
+		public Vector4[] debugMainCameraFrustumPlanes;
 		public int blurIterations;
 	}
 
@@ -151,6 +153,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private ProfilingSampler downsampleDepthProfilingSampler;
 	private readonly Vector4[] mainCameraFrustumPlanes = new Vector4[6];
 	private bool sceneViewMainCameraFrustumMaskEnabled;
+	private static bool debugDrawFroxelClusters;
+	private static bool debugDrawOnlyOccupiedFroxels = true;
+	private static int debugMaxFroxelsToDraw = 256;
+	private static Color debugFroxelColor = new Color(0.0f, 1.0f, 1.0f, 1.0f);
 
 	private static bool isMaterialStateInitialized;
 	private static bool cachedMainLightContributionEnabled;
@@ -234,6 +240,21 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		}
 	}
 
+	/// <summary>
+	/// Configures froxel debug line drawing.
+	/// </summary>
+	/// <param name="enableDebugDrawing"></param>
+	/// <param name="drawOnlyOccupiedFroxels"></param>
+	/// <param name="maxFroxelsToDraw"></param>
+	/// <param name="froxelColor"></param>
+	public void SetupFroxelDebugDrawing(bool enableDebugDrawing, bool drawOnlyOccupiedFroxels, int maxFroxelsToDraw, Color froxelColor)
+	{
+		debugDrawFroxelClusters = enableDebugDrawing;
+		debugDrawOnlyOccupiedFroxels = drawOnlyOccupiedFroxels;
+		debugMaxFroxelsToDraw = Mathf.Max(1, maxFroxelsToDraw);
+		debugFroxelColor = froxelColor;
+	}
+
 	#endregion
 
 	#region Scriptable Render Pass Methods
@@ -296,7 +317,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		using (new ProfilingScope(cmd, profilingSampler))
 		{
-			UpdateVolumetricFogMaterialParameters(volumetricFogMaterial, fogVolume, renderingData.cameraData.camera, cameraPosition, renderingData.lightData.mainLightIndex, renderingData.lightData.additionalLightsCount, renderingData.lightData.visibleLights);
+			UpdateVolumetricFogMaterialParameters(volumetricFogMaterial, fogVolume, renderingData.cameraData.camera, cameraPosition, renderingData.lightData.mainLightIndex, renderingData.lightData.additionalLightsCount, renderingData.lightData.visibleLights, sceneViewMainCameraFrustumMaskEnabled, mainCameraFrustumPlanes);
 			Blitter.BlitCameraTexture(cmd, volumetricFogRenderRTHandle, volumetricFogRenderRTHandle, volumetricFogMaterial, volumetricFogRenderPassIndex);
 
 			int blurIterations = fogVolume != null ? fogVolume.blurIterations.value : 0;
@@ -365,6 +386,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			passData.fogVolume = fogVolume;
 			passData.cameraPosition = cameraPosition;
 			passData.camera = sceneCamera;
+			passData.debugRestrictToMainCameraFrustum = sceneViewMainCameraFrustumMaskEnabled;
+			passData.debugMainCameraFrustumPlanes = mainCameraFrustumPlanes;
 
 			builder.SetRenderAttachment(volumetricFogRenderTarget, 0, AccessFlags.WriteAll);
 			builder.UseTexture(downsampledCameraDepthTarget);
@@ -449,7 +472,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="mainLightIndex"></param>
 	/// <param name="additionalLightsCount"></param>
 	/// <param name="visibleLights"></param>
-	private static void UpdateVolumetricFogMaterialParameters(Material volumetricFogMaterial, VolumetricFogVolumeComponent fogVolume, Camera camera, Vector3 cameraPosition, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights)
+	private static void UpdateVolumetricFogMaterialParameters(Material volumetricFogMaterial, VolumetricFogVolumeComponent fogVolume, Camera camera, Vector3 cameraPosition, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights, bool debugRestrictToMainCameraFrustum, Vector4[] debugMainCameraFrustumPlanes)
 	{
 		if (fogVolume == null)
 			return;
@@ -530,7 +553,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		bool enableFroxelClusteredLights = enableAdditionalLightsContribution && effectiveAdditionalLightsCount > 0;
 		int froxelHash = 0;
 		if (enableFroxelClusteredLights)
-			enableFroxelClusteredLights = TryConfigureFroxelClusteredLights(volumetricFogMaterial, camera, effectiveAdditionalLightsCount, out froxelHash);
+			enableFroxelClusteredLights = TryConfigureFroxelClusteredLights(volumetricFogMaterial, camera, effectiveAdditionalLightsCount, debugRestrictToMainCameraFrustum, debugMainCameraFrustumPlanes, out froxelHash);
 
 		if (!isMaterialStateInitialized || cachedFroxelClusteredLightsEnabled != enableFroxelClusteredLights)
 		{
@@ -762,7 +785,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="selectedAdditionalLightsCount"></param>
 	/// <param name="froxelHash"></param>
 	/// <returns></returns>
-	private static bool TryConfigureFroxelClusteredLights(Material material, Camera camera, int selectedAdditionalLightsCount, out int froxelHash)
+	private static bool TryConfigureFroxelClusteredLights(Material material, Camera camera, int selectedAdditionalLightsCount, bool debugRestrictToMainCameraFrustum, Vector4[] debugMainCameraFrustumPlanes, out int froxelHash)
 	{
 		froxelHash = 0;
 		if (camera == null || selectedAdditionalLightsCount <= 0 || !SystemInfo.supportsComputeShaders)
@@ -785,6 +808,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		material.SetBuffer(FroxelLightIndicesBufferId, froxelLightIndicesBuffer);
 		material.SetVector(FroxelGridDimensionsId, new Vector4(FroxelGridWidth, FroxelGridHeight, FroxelGridDepth, FroxelMaxLightsPerCell));
 		material.SetVector(FroxelNearFarId, new Vector4(camera.nearClipPlane, camera.farClipPlane, 0.0f, 0.0f));
+		DrawFroxelDebug(camera, debugRestrictToMainCameraFrustum, debugMainCameraFrustumPlanes);
 
 		return true;
 	}
@@ -884,6 +908,160 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			FroxelMetas[i].offset = i * FroxelMaxLightsPerCell;
 			FroxelMetas[i].count = FroxelCellLightCounts[i];
 		}
+	}
+
+	/// <summary>
+	/// Draws froxel debug lines in scene view using Unity debug lines.
+	/// </summary>
+	/// <param name="camera"></param>
+	private static void DrawFroxelDebug(Camera camera, bool restrictToMainCameraFrustum, Vector4[] mainCameraFrustumPlanes)
+	{
+		if (!debugDrawFroxelClusters || camera == null || camera.cameraType != CameraType.SceneView)
+			return;
+
+		float near = Mathf.Max(camera.nearClipPlane, 0.01f);
+		float far = Mathf.Max(camera.farClipPlane, near + 0.01f);
+		int maxCellsToDraw = Mathf.Max(1, debugMaxFroxelsToDraw);
+		int drawnCells = 0;
+
+		for (int z = 0; z < FroxelGridDepth; ++z)
+		{
+			float sliceNearDepth = FroxelSliceToDepth(z, near, far);
+			float sliceFarDepth = FroxelSliceToDepth(z + 1, near, far);
+
+			for (int y = 0; y < FroxelGridHeight; ++y)
+			{
+				for (int x = 0; x < FroxelGridWidth; ++x)
+				{
+					int froxelIndex = x + (y * FroxelGridWidth) + (z * FroxelGridWidth * FroxelGridHeight);
+					int lightCount = FroxelCellLightCounts[froxelIndex];
+					if (debugDrawOnlyOccupiedFroxels && lightCount <= 0)
+						continue;
+
+					if (restrictToMainCameraFrustum && !IsFroxelCellInsideMainCameraFrustum(camera, x, y, sliceNearDepth, sliceFarDepth, mainCameraFrustumPlanes))
+						continue;
+
+					Color drawColor = debugFroxelColor;
+					if (lightCount > 0)
+					{
+						float t = Mathf.Clamp01(lightCount / (float)FroxelMaxLightsPerCell);
+						drawColor = Color.Lerp(debugFroxelColor * 0.35f, debugFroxelColor, t);
+					}
+					else
+					{
+						drawColor *= 0.35f;
+					}
+
+					DrawFroxelCell(camera, x, y, sliceNearDepth, sliceFarDepth, drawColor);
+					drawnCells++;
+
+					if (drawnCells >= maxCellsToDraw)
+						return;
+				}
+			}
+		}
+	}
+
+	/// <summary>
+	/// Draws one froxel cell as a wireframe box.
+	/// </summary>
+	/// <param name="camera"></param>
+	/// <param name="x"></param>
+	/// <param name="y"></param>
+	/// <param name="nearDepth"></param>
+	/// <param name="farDepth"></param>
+	/// <param name="color"></param>
+	private static void DrawFroxelCell(Camera camera, int x, int y, float nearDepth, float farDepth, Color color)
+	{
+		float u0 = x / (float)FroxelGridWidth;
+		float u1 = (x + 1) / (float)FroxelGridWidth;
+		float v0 = y / (float)FroxelGridHeight;
+		float v1 = (y + 1) / (float)FroxelGridHeight;
+
+		Vector3 n00 = camera.ViewportToWorldPoint(new Vector3(u0, v0, nearDepth));
+		Vector3 n10 = camera.ViewportToWorldPoint(new Vector3(u1, v0, nearDepth));
+		Vector3 n11 = camera.ViewportToWorldPoint(new Vector3(u1, v1, nearDepth));
+		Vector3 n01 = camera.ViewportToWorldPoint(new Vector3(u0, v1, nearDepth));
+
+		Vector3 f00 = camera.ViewportToWorldPoint(new Vector3(u0, v0, farDepth));
+		Vector3 f10 = camera.ViewportToWorldPoint(new Vector3(u1, v0, farDepth));
+		Vector3 f11 = camera.ViewportToWorldPoint(new Vector3(u1, v1, farDepth));
+		Vector3 f01 = camera.ViewportToWorldPoint(new Vector3(u0, v1, farDepth));
+
+		// Near face.
+		Debug.DrawLine(n00, n10, color, 0.0f, false);
+		Debug.DrawLine(n10, n11, color, 0.0f, false);
+		Debug.DrawLine(n11, n01, color, 0.0f, false);
+		Debug.DrawLine(n01, n00, color, 0.0f, false);
+
+		// Far face.
+		Debug.DrawLine(f00, f10, color, 0.0f, false);
+		Debug.DrawLine(f10, f11, color, 0.0f, false);
+		Debug.DrawLine(f11, f01, color, 0.0f, false);
+		Debug.DrawLine(f01, f00, color, 0.0f, false);
+
+		// Side edges.
+		Debug.DrawLine(n00, f00, color, 0.0f, false);
+		Debug.DrawLine(n10, f10, color, 0.0f, false);
+		Debug.DrawLine(n11, f11, color, 0.0f, false);
+		Debug.DrawLine(n01, f01, color, 0.0f, false);
+	}
+
+	/// <summary>
+	/// Returns whether the froxel center lies inside the main camera frustum planes.
+	/// </summary>
+	/// <param name="camera"></param>
+	/// <param name="x"></param>
+	/// <param name="y"></param>
+	/// <param name="nearDepth"></param>
+	/// <param name="farDepth"></param>
+	/// <param name="frustumPlanes"></param>
+	/// <returns></returns>
+	private static bool IsFroxelCellInsideMainCameraFrustum(Camera camera, int x, int y, float nearDepth, float farDepth, Vector4[] frustumPlanes)
+	{
+		if (frustumPlanes == null || frustumPlanes.Length < 6)
+			return true;
+
+		float u = (x + 0.5f) / FroxelGridWidth;
+		float v = (y + 0.5f) / FroxelGridHeight;
+		float depth = 0.5f * (nearDepth + farDepth);
+		Vector3 centerWorldPosition = camera.ViewportToWorldPoint(new Vector3(u, v, depth));
+		return IsPositionInsideFrustumPlanes(centerWorldPosition, frustumPlanes);
+	}
+
+	/// <summary>
+	/// Returns whether a world-space position is inside all frustum planes.
+	/// </summary>
+	/// <param name="positionWS"></param>
+	/// <param name="frustumPlanes"></param>
+	/// <returns></returns>
+	private static bool IsPositionInsideFrustumPlanes(Vector3 positionWS, Vector4[] frustumPlanes)
+	{
+		if (frustumPlanes == null || frustumPlanes.Length < 6)
+			return true;
+
+		for (int i = 0; i < 6; ++i)
+		{
+			Vector4 plane = frustumPlanes[i];
+			float signedDistance = (plane.x * positionWS.x) + (plane.y * positionWS.y) + (plane.z * positionWS.z) + plane.w;
+			if (signedDistance < 0.0f)
+				return false;
+		}
+
+		return true;
+	}
+
+	/// <summary>
+	/// Converts froxel slice index to eye depth.
+	/// </summary>
+	/// <param name="sliceIndex"></param>
+	/// <param name="near"></param>
+	/// <param name="far"></param>
+	/// <returns></returns>
+	private static float FroxelSliceToDepth(int sliceIndex, float near, float far)
+	{
+		float t = Mathf.Clamp01(sliceIndex / (float)FroxelGridDepth);
+		return near * Mathf.Exp(Mathf.Log(far / near) * t);
 	}
 
 	/// <summary>
@@ -1140,7 +1318,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (stage == PassStage.VolumetricFogRender)
 		{
 			passData.material.SetTexture(DownsampledCameraDepthTextureId, passData.downsampledCameraDepthTarget);
-			UpdateVolumetricFogMaterialParameters(passData.material, passData.fogVolume, passData.camera, passData.cameraPosition, passData.lightData.mainLightIndex, passData.lightData.additionalLightsCount, passData.lightData.visibleLights);
+			UpdateVolumetricFogMaterialParameters(passData.material, passData.fogVolume, passData.camera, passData.cameraPosition, passData.lightData.mainLightIndex, passData.lightData.additionalLightsCount, passData.lightData.visibleLights, passData.debugRestrictToMainCameraFrustum, passData.debugMainCameraFrustumPlanes);
 		}
 		else if (stage == PassStage.VolumetricFogUpsampleComposition)
 		{
