@@ -140,7 +140,7 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		if (staticLightsBakeEnabled)
 		{
 			PropertyField(staticLightsBakeRevision);
-			EditorGUILayout.HelpBox("Static lights bake uses only static lights and keeps old baked lighting until you increase Bake Revision.", MessageType.Info);
+			EditorGUILayout.HelpBox("Precomputes static reusable light data for performance while preserving the same visual result as unbaked mode. Increase Bake Revision after major scene/light setup changes.", MessageType.Info);
 		}
 
 		PropertyField(enabled);
