@@ -1135,6 +1135,47 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		debugSolidCubeDrawCount = 0;
 	}
 
+#if UNITY_6000_0_OR_NEWER
+	/// <summary>
+	/// Draws all queued translucent debug cubes through a render-graph raster command buffer.
+	/// </summary>
+	/// <param name="cmd"></param>
+	/// <param name="camera"></param>
+	private static void DrawQueuedDebugSolidCubes(RasterCommandBuffer cmd, Camera camera)
+	{
+		if (camera == null || debugSolidCubeDrawCount <= 0 || debugWorldSpaceCubeFillOpacity <= 0.0f)
+		{
+			debugSolidCubeDrawCount = 0;
+			return;
+		}
+
+		if (!EnsureDebugSolidCubeResources())
+		{
+			debugSolidCubeDrawCount = 0;
+			return;
+		}
+
+		if (debugSolidCubePropertyBlock == null)
+			debugSolidCubePropertyBlock = new MaterialPropertyBlock();
+
+		float fillAlpha = Mathf.Clamp01(debugWorldSpaceCubeFillOpacity * Mathf.Max(debugFroxelColor.a, 0.0001f));
+		for (int i = 0; i < debugSolidCubeDrawCount; ++i)
+		{
+			DebugSolidCubeDraw cube = debugSolidCubeDraws[i];
+			Color fillColor = cube.color;
+			fillColor.a = fillAlpha;
+
+			debugSolidCubePropertyBlock.SetColor(DebugColorId, fillColor);
+
+			Vector3 scale = Vector3.one * (cube.halfExtent * 2.0f);
+			Matrix4x4 matrix = Matrix4x4.TRS(cube.center, Quaternion.identity, scale);
+			cmd.DrawMesh(debugUnitCubeMesh, matrix, debugSolidCubeMaterial, 0, 0, debugSolidCubePropertyBlock);
+		}
+
+		debugSolidCubeDrawCount = 0;
+	}
+#endif
+
 	/// <summary>
 	/// Draws an axis-aligned world-space wire cube.
 	/// </summary>
@@ -1572,7 +1613,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static void ExecutePass(PassData passData, RasterGraphContext context)
 	{
 		PassStage stage = passData.stage;
-		CommandBuffer cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
 
 		if (stage == PassStage.VolumetricFogRender)
 		{
@@ -1587,7 +1627,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		Blitter.BlitTexture(context.cmd, passData.source, Vector2.one, passData.material, passData.materialPassIndex);
 
 		if (stage == PassStage.VolumetricFogUpsampleComposition)
-			DrawQueuedDebugSolidCubes(cmd, passData.camera);
+			DrawQueuedDebugSolidCubes(context.cmd, passData.camera);
 	}
 
 	/// <summary>
