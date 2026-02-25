@@ -1,17 +1,23 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
 
 /// <summary>
 /// Editor utility that bakes volumetric lighting from baked lights into a 3D texture asset.
 /// </summary>
 internal static class VolumetricFogBakedDataBaker
 {
+	private const int MaxBakedStaticLights = 64;
+	private static readonly MethodInfo UrpGetLightAttenuationAndSpotDirectionMethod = ResolveUrpAttenuationMethod();
+
 	private struct BakedOcclusionSettings
 	{
 		public bool enabled;
 		public int layerMask;
+		public bool staticOccludersOnly;
 		public float rayBias;
 		public float directionalDistance;
 		public bool createTemporaryMeshColliders;
@@ -27,6 +33,7 @@ internal static class VolumetricFogBakedDataBaker
 		public Vector3 color;
 		public Vector3 position;
 		public Vector3 direction;
+		public Vector4 attenuation;
 		public float rangeSq;
 		public float invRangeSq;
 		public float radiusSq;
@@ -55,10 +62,10 @@ internal static class VolumetricFogBakedDataBaker
 
 		public int CreatedCollidersCount => temporaryColliderObjects.Count;
 
-		public static TemporaryBakeColliderScope Create(int layerMask)
+		public static TemporaryBakeColliderScope Create(int layerMask, bool staticOccludersOnly)
 		{
 			TemporaryBakeColliderScope scope = new TemporaryBakeColliderScope();
-			scope.CreateTemporaryMeshColliders(layerMask);
+			scope.CreateTemporaryMeshColliders(layerMask, staticOccludersOnly);
 			return scope;
 		}
 
@@ -74,7 +81,7 @@ internal static class VolumetricFogBakedDataBaker
 			temporaryColliderObjects.Clear();
 		}
 
-		private void CreateTemporaryMeshColliders(int layerMask)
+		private void CreateTemporaryMeshColliders(int layerMask, bool staticOccludersOnly)
 		{
 #if UNITY_2023_1_OR_NEWER
 			Renderer[] renderers = UnityEngine.Object.FindObjectsByType<Renderer>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
@@ -91,6 +98,12 @@ internal static class VolumetricFogBakedDataBaker
 				if (!(renderer is MeshRenderer))
 					continue;
 
+				if (staticOccludersOnly && !IsHierarchyStatic(renderer.gameObject))
+					continue;
+
+				if (renderer.shadowCastingMode == UnityEngine.Rendering.ShadowCastingMode.Off)
+					continue;
+
 				int rendererLayerBit = 1 << renderer.gameObject.layer;
 				if ((layerMask & rendererLayerBit) == 0)
 					continue;
@@ -104,6 +117,7 @@ internal static class VolumetricFogBakedDataBaker
 
 				GameObject tempColliderObject = new GameObject("__VolumetricFogBakeCollider");
 				tempColliderObject.hideFlags = HideFlags.HideAndDontSave;
+				tempColliderObject.isStatic = true;
 				tempColliderObject.layer = renderer.gameObject.layer;
 				tempColliderObject.transform.SetParent(renderer.transform, false);
 				tempColliderObject.transform.localPosition = Vector3.zero;
@@ -171,6 +185,9 @@ internal static class VolumetricFogBakedDataBaker
 		Undo.RecordObject(bakedData, "Clear Volumetric Fog Baked Texture");
 		bakedData.SetLightingTexture(null);
 		bakedData.SetDirectionTexture(null);
+		if (bakedData.StaticVisibilityTextureArray != null)
+			UnityEngine.Object.DestroyImmediate(bakedData.StaticVisibilityTextureArray, true);
+		bakedData.ClearStaticLightsData();
 		bakedData.SetBakedLightsCount(0);
 		EditorUtility.SetDirty(bakedData);
 		AssetDatabase.SaveAssets();
@@ -188,6 +205,11 @@ internal static class VolumetricFogBakedDataBaker
 		}
 
 		List<BakedLightSample> bakedLights = CollectBakedLights(fogVolume, out int defaultAdditionalScatteringLightsCount);
+		if (bakedLights.Count > MaxBakedStaticLights)
+		{
+			bakedLights.RemoveRange(MaxBakedStaticLights, bakedLights.Count - MaxBakedStaticLights);
+			Debug.LogWarning($"Volumetric fog bake trimmed baked static lights to {MaxBakedStaticLights} for runtime shader limits.", fogVolume);
+		}
 		bakedLightsCount = bakedLights.Count;
 		if (bakedLightsCount == 0)
 			Debug.LogWarning("Volumetric fog bake found no lights configured as Baked that contribute to fog. Check each Light Mode and bake volume bounds. A black baked texture will be generated.", fogVolume);
@@ -213,6 +235,7 @@ internal static class VolumetricFogBakedDataBaker
 		{
 			enabled = bakedData.EnableShadowOcclusion,
 			layerMask = bakedData.OccluderLayerMask,
+			staticOccludersOnly = bakedData.StaticOccludersOnly,
 			rayBias = Mathf.Max(0.0f, bakedData.ShadowRayBias),
 			directionalDistance = Mathf.Max(1.0f, bakedData.DirectionalShadowDistance),
 			createTemporaryMeshColliders = bakedData.CreateTemporaryMeshColliders,
@@ -223,11 +246,11 @@ internal static class VolumetricFogBakedDataBaker
 		};
 
 		using (TemporaryBakeColliderScope temporaryColliderScope = occlusionSettings.enabled && occlusionSettings.createTemporaryMeshColliders
-			? TemporaryBakeColliderScope.Create(occlusionSettings.layerMask)
+			? TemporaryBakeColliderScope.Create(occlusionSettings.layerMask, occlusionSettings.staticOccludersOnly)
 			: null)
 		{
 			if (temporaryColliderScope != null && temporaryColliderScope.CreatedCollidersCount > 0)
-				Debug.Log($"Volumetric fog bake: created {temporaryColliderScope.CreatedCollidersCount} temporary mesh colliders for occlusion sampling.", fogVolume);
+				Debug.Log($"Volumetric fog bake: created {temporaryColliderScope.CreatedCollidersCount} temporary mesh colliders for occlusion sampling ({(occlusionSettings.staticOccludersOnly ? "static-only" : "all layer objects")}).", fogVolume);
 
 			try
 			{
@@ -273,20 +296,39 @@ internal static class VolumetricFogBakedDataBaker
 
 		Texture3D bakedLightingTexture = GetOrCreateBakedTextureAsset(bakedData, resolutionX, resolutionY, resolutionZ, isDirectionTexture: false);
 		Texture3D bakedDirectionTexture = GetOrCreateBakedTextureAsset(bakedData, resolutionX, resolutionY, resolutionZ, isDirectionTexture: true);
+		Texture3DArray bakedVisibilityTextureArray = GetOrCreateBakedVisibilityTextureArrayAsset(bakedData, resolutionX, resolutionY, resolutionZ, bakedLightsCount);
 		if (bakedLightingTexture == null || bakedDirectionTexture == null)
 			return false;
+
+		if (bakedLightsCount <= 0 && bakedData.StaticVisibilityTextureArray != null)
+			UnityEngine.Object.DestroyImmediate(bakedData.StaticVisibilityTextureArray, true);
 
 		bakedLightingTexture.SetPixels(bakedLightingColors);
 		bakedLightingTexture.Apply(false, false);
 		bakedDirectionTexture.SetPixels(bakedDirectionColors);
 		bakedDirectionTexture.Apply(false, false);
 
+		if (bakedLightsCount > 0)
+		{
+			if (bakedVisibilityTextureArray == null)
+				return false;
+
+			if (!BakeStaticVisibilityTextureArray(bakedVisibilityTextureArray, bakedLights, occlusionSettings, boundsMin, boundsSize, resolutionX, resolutionY, resolutionZ, fogVolume))
+				return false;
+		}
+
+		VolumetricFogBakedStaticLightData[] staticLightsData = BuildStaticLightsData(bakedLights);
+
 		Undo.RecordObject(bakedData, "Bake Volumetric Fog Lighting");
 		bakedData.SetLightingTexture(bakedLightingTexture);
 		bakedData.SetDirectionTexture(bakedDirectionTexture);
+		bakedData.SetStaticVisibilityTextureArray(bakedLightsCount > 0 ? bakedVisibilityTextureArray : null);
+		bakedData.SetStaticLights(staticLightsData);
 		bakedData.SetBakedLightsCount(bakedLightsCount);
 		EditorUtility.SetDirty(bakedLightingTexture);
 		EditorUtility.SetDirty(bakedDirectionTexture);
+		if (bakedVisibilityTextureArray != null)
+			EditorUtility.SetDirty(bakedVisibilityTextureArray);
 		EditorUtility.SetDirty(bakedData);
 
 		AssetDatabase.SaveAssets();
@@ -326,6 +368,140 @@ internal static class VolumetricFogBakedDataBaker
 		}
 
 		return texture;
+	}
+
+	private static Texture3DArray GetOrCreateBakedVisibilityTextureArrayAsset(VolumetricFogBakedData bakedData, int resolutionX, int resolutionY, int resolutionZ, int lightCount)
+	{
+		Texture3DArray textureArray = bakedData.StaticVisibilityTextureArray;
+		if (lightCount <= 0)
+			return null;
+
+		bool needsCreate = textureArray == null
+			|| textureArray.width != resolutionX
+			|| textureArray.height != resolutionY
+			|| textureArray.depth != resolutionZ
+			|| textureArray.volumeDepth != lightCount
+			|| textureArray.format != TextureFormat.RGBAHalf;
+
+		if (needsCreate)
+		{
+			if (textureArray != null)
+				UnityEngine.Object.DestroyImmediate(textureArray, true);
+
+			textureArray = new Texture3DArray(resolutionX, resolutionY, resolutionZ, lightCount, TextureFormat.RGBAHalf, false, true);
+			textureArray.name = "VolumetricFogBakedVisibility";
+			textureArray.wrapMode = TextureWrapMode.Clamp;
+			textureArray.filterMode = FilterMode.Bilinear;
+			textureArray.anisoLevel = 0;
+			textureArray.hideFlags = HideFlags.HideInHierarchy;
+			AssetDatabase.AddObjectToAsset(textureArray, bakedData);
+		}
+		else
+		{
+			textureArray.wrapMode = TextureWrapMode.Clamp;
+			textureArray.filterMode = FilterMode.Bilinear;
+			textureArray.anisoLevel = 0;
+			textureArray.hideFlags = HideFlags.HideInHierarchy;
+		}
+
+		return textureArray;
+	}
+
+	private static bool BakeStaticVisibilityTextureArray(Texture3DArray visibilityTextureArray, List<BakedLightSample> bakedLights, in BakedOcclusionSettings occlusionSettings, Vector3 boundsMin, Vector3 boundsSize, int resolutionX, int resolutionY, int resolutionZ, VolumetricFogVolumeComponent fogVolume)
+	{
+		if (visibilityTextureArray == null || bakedLights == null || bakedLights.Count == 0)
+			return true;
+
+		float invResolutionX = 1.0f / resolutionX;
+		float invResolutionY = 1.0f / resolutionY;
+		float invResolutionZ = 1.0f / resolutionZ;
+		int voxelCount = resolutionX * resolutionY * resolutionZ;
+		int xyStride = resolutionX * resolutionY;
+
+		using (TemporaryBakeColliderScope temporaryColliderScope = occlusionSettings.enabled && occlusionSettings.createTemporaryMeshColliders
+			? TemporaryBakeColliderScope.Create(occlusionSettings.layerMask, occlusionSettings.staticOccludersOnly)
+			: null)
+		{
+			if (temporaryColliderScope != null && temporaryColliderScope.CreatedCollidersCount > 0)
+				Debug.Log($"Volumetric fog bake: created {temporaryColliderScope.CreatedCollidersCount} temporary mesh colliders for static visibility volume ({(occlusionSettings.staticOccludersOnly ? "static-only" : "all layer objects")}).", fogVolume);
+
+			try
+			{
+				for (int lightIndex = 0; lightIndex < bakedLights.Count; ++lightIndex)
+				{
+					BakedLightSample light = bakedLights[lightIndex];
+					Color[] visibilityColors = new Color[voxelCount];
+
+					for (int z = 0; z < resolutionZ; ++z)
+					{
+						float globalProgress = ((lightIndex * resolutionZ) + z) / (float)Mathf.Max(1, bakedLights.Count * resolutionZ - 1);
+						if (EditorUtility.DisplayCancelableProgressBar("Volumetric Fog Bake", $"Baking static shadow visibility ({lightIndex + 1}/{bakedLights.Count})...", globalProgress))
+						{
+							Debug.LogWarning("Volumetric fog visibility bake cancelled by user.", fogVolume);
+							return false;
+						}
+
+						float vz = (z + 0.5f) * invResolutionZ;
+						float positionZ = boundsMin.z + vz * boundsSize.z;
+
+						for (int y = 0; y < resolutionY; ++y)
+						{
+							float vy = (y + 0.5f) * invResolutionY;
+							float positionY = boundsMin.y + vy * boundsSize.y;
+							int rowOffset = y * resolutionX + z * xyStride;
+
+							for (int x = 0; x < resolutionX; ++x)
+							{
+								float vx = (x + 0.5f) * invResolutionX;
+								float positionX = boundsMin.x + vx * boundsSize.x;
+								Vector3 positionWS = new Vector3(positionX, positionY, positionZ);
+								float visibility = Mathf.Clamp01(ComputeShadowVisibility(positionWS, light, occlusionSettings));
+								int voxelIndex = rowOffset + x;
+								visibilityColors[voxelIndex] = new Color(visibility, 0.0f, 0.0f, 1.0f);
+							}
+						}
+					}
+
+					visibilityTextureArray.SetPixels(visibilityColors, lightIndex, 0);
+				}
+			}
+			finally
+			{
+				EditorUtility.ClearProgressBar();
+			}
+		}
+
+		visibilityTextureArray.Apply(false, false);
+		return true;
+	}
+
+	private static VolumetricFogBakedStaticLightData[] BuildStaticLightsData(List<BakedLightSample> bakedLights)
+	{
+		if (bakedLights == null || bakedLights.Count == 0)
+			return Array.Empty<VolumetricFogBakedStaticLightData>();
+
+		VolumetricFogBakedStaticLightData[] staticLightsData = new VolumetricFogBakedStaticLightData[bakedLights.Count];
+		for (int i = 0; i < bakedLights.Count; ++i)
+		{
+			BakedLightSample bakedLight = bakedLights[i];
+			staticLightsData[i] = new VolumetricFogBakedStaticLightData
+			{
+				lightType = (int)bakedLight.type,
+				color = bakedLight.color,
+				position = bakedLight.position,
+				direction = bakedLight.direction,
+				attenuation = bakedLight.attenuation,
+				rangeSq = bakedLight.rangeSq,
+				invRangeSq = bakedLight.invRangeSq,
+				radiusSq = bakedLight.radiusSq,
+				scattering = bakedLight.scattering,
+				anisotropy = bakedLight.anisotropy,
+				spotScale = bakedLight.spotScale,
+				spotOffset = bakedLight.spotOffset
+			};
+		}
+
+		return staticLightsData;
 	}
 
 	private static List<BakedLightSample> CollectBakedLights(VolumetricFogVolumeComponent fogVolume, out int defaultAdditionalScatteringLightsCount)
@@ -391,6 +567,7 @@ internal static class VolumetricFogBakedDataBaker
 				color = color,
 				position = light.transform.position,
 				direction = light.transform.forward.normalized,
+				attenuation = new Vector4(1.0f / Mathf.Max(light.range * light.range, 0.0001f), 0.0f, 0.0f, 1.0f),
 				rangeSq = Mathf.Max(light.range * light.range, 0.0001f),
 				scattering = scattering,
 				anisotropy = anisotropy,
@@ -406,6 +583,9 @@ internal static class VolumetricFogBakedDataBaker
 			if (light.type == LightType.Point || light.type == LightType.Spot)
 			{
 				bakedLight.invRangeSq = 1.0f / bakedLight.rangeSq;
+				TryGetUrpLightAttenuationAndSpotDirection(light, out Vector4 urpAttenuation, out Vector3 urpSpotDirection);
+				bakedLight.attenuation = urpAttenuation;
+				bakedLight.direction = urpSpotDirection.sqrMagnitude > 0.000001f ? urpSpotDirection.normalized : bakedLight.direction;
 			}
 
 			if (light.type == LightType.Point || light.type == LightType.Spot)
@@ -457,21 +637,14 @@ internal static class VolumetricFogBakedDataBaker
 			}
 			else
 			{
-				Vector3 toPoint = positionWS - light.position;
-				float distanceSq = Vector3.Dot(toPoint, toPoint);
+				Vector3 toLight = light.position - positionWS;
+				float distanceSq = Vector3.Dot(toLight, toLight);
 				if (distanceSq >= light.rangeSq)
 					continue;
 
 				float distance = Mathf.Sqrt(Mathf.Max(distanceSq, 0.000001f));
-				directionToLight = (light.position - positionWS) / distance;
-
-				// Approximate URP distance attenuation to avoid broad over-bright baked punctual contribution.
-				float distanceAttenuation = 1.0f / Mathf.Max(distanceSq, 0.0001f);
-				float rangeFactor = distanceSq * light.invRangeSq;
-				float smoothFactor = 1.0f - (rangeFactor * rangeFactor);
-				smoothFactor = Mathf.Clamp01(smoothFactor);
-				smoothFactor *= smoothFactor;
-				attenuation = distanceAttenuation * smoothFactor;
+				directionToLight = toLight / distance;
+				attenuation = EvaluatePunctualDistanceAndAngleAttenuation(light, directionToLight, distanceSq);
 
 				// Match runtime smoothing near light origin to reduce noise and energy spike.
 				float radiusSq = Mathf.Max(light.radiusSq, 0.000001f);
@@ -479,13 +652,6 @@ internal static class VolumetricFogBakedDataBaker
 				radialFade = radialFade * radialFade * (3.0f - (2.0f * radialFade));
 				radialFade *= radialFade;
 				attenuation *= radialFade;
-
-				if (light.type == LightType.Spot)
-				{
-					float cosAngle = Vector3.Dot(light.direction, -directionToLight);
-					float spotAttenuation = Mathf.Clamp01(cosAngle * light.spotScale + light.spotOffset);
-					attenuation *= spotAttenuation * spotAttenuation;
-				}
 
 				float visibility = ComputeShadowVisibility(positionWS, light, occlusionSettings);
 				if (visibility <= 0.0001f)
@@ -525,6 +691,45 @@ internal static class VolumetricFogBakedDataBaker
 	private static float GetLuminance(Vector3 color)
 	{
 		return color.x * 0.2126f + color.y * 0.7152f + color.z * 0.0722f;
+	}
+
+	private static float EvaluatePunctualDistanceAndAngleAttenuation(in BakedLightSample light, in Vector3 directionToLight, float distanceSq)
+	{
+		Vector4 attenuationParams = light.attenuation;
+		float distanceAttenuation = EvaluateDistanceAttenuation(distanceSq, attenuationParams.x, attenuationParams.y);
+		float angleAttenuation = light.type == LightType.Spot
+			? EvaluateAngleAttenuation(light.direction, directionToLight, attenuationParams.z, attenuationParams.w)
+			: 1.0f;
+		return distanceAttenuation * angleAttenuation;
+	}
+
+	private static float EvaluateDistanceAttenuation(float distanceSq, float attenuationX, float attenuationY)
+	{
+		float safeDistanceSq = Mathf.Max(distanceSq, 0.0001f);
+
+		// Keep compatibility with both URP attenuation packings:
+		// - High quality uses only attenuationX (attenuationY ~= 0)
+		// - Low quality uses attenuationX/attenuationY linear remap.
+		float smoothFactor;
+		if (Mathf.Abs(attenuationY) < 0.000001f)
+		{
+			float factor = safeDistanceSq * attenuationX;
+			smoothFactor = 1.0f - factor * factor;
+		}
+		else
+		{
+			smoothFactor = safeDistanceSq * attenuationX + attenuationY;
+		}
+
+		smoothFactor = Mathf.Clamp01(smoothFactor);
+		smoothFactor *= smoothFactor;
+		return smoothFactor / safeDistanceSq;
+	}
+
+	private static float EvaluateAngleAttenuation(in Vector3 spotDirection, in Vector3 directionToLight, float scale, float offset)
+	{
+		float spotAttenuation = Mathf.Clamp01(Vector3.Dot(spotDirection, directionToLight) * scale + offset);
+		return spotAttenuation * spotAttenuation;
 	}
 
 	private static float ComputeShadowVisibility(Vector3 positionWS, in BakedLightSample light, in BakedOcclusionSettings settings)
@@ -573,7 +778,7 @@ internal static class VolumetricFogBakedDataBaker
 				: baseDirectionToLight;
 
 			Vector3 rayOrigin = positionWS + sampleDirection * settings.rayBias;
-			bool occluded = RaycastOccluder(rayOrigin, sampleDirection, maxDistance, settings.layerMask);
+			bool occluded = RaycastOccluder(rayOrigin, sampleDirection, maxDistance, settings);
 			if (!occluded)
 				visibleSamples++;
 		}
@@ -582,12 +787,26 @@ internal static class VolumetricFogBakedDataBaker
 		return Mathf.Lerp(1.0f, visibility, light.shadowStrength);
 	}
 
-	private static bool RaycastOccluder(Vector3 rayOrigin, Vector3 rayDirection, float distance, int layerMask)
+	private static bool RaycastOccluder(Vector3 rayOrigin, Vector3 rayDirection, float distance, in BakedOcclusionSettings settings)
 	{
 		if (distance <= 0.0f)
 			return false;
 
-		return Physics.Raycast(rayOrigin, rayDirection, distance, layerMask, QueryTriggerInteraction.Ignore);
+		if (!settings.staticOccludersOnly)
+			return Physics.Raycast(rayOrigin, rayDirection, distance, settings.layerMask, QueryTriggerInteraction.Ignore);
+
+		RaycastHit[] hits = Physics.RaycastAll(rayOrigin, rayDirection, distance, settings.layerMask, QueryTriggerInteraction.Ignore);
+		for (int i = 0; i < hits.Length; ++i)
+		{
+			Collider hitCollider = hits[i].collider;
+			if (hitCollider == null)
+				continue;
+
+			if (IsHierarchyStatic(hitCollider.gameObject))
+				return true;
+		}
+
+		return false;
 	}
 
 	private static Vector3 GetConeSampleDirection(Vector3 baseDirection, int sampleIndex, int sampleCount, float coneAngleRadians)
@@ -617,6 +836,160 @@ internal static class VolumetricFogBakedDataBaker
 		Vector3 up = Mathf.Abs(normal.y) < 0.99f ? Vector3.up : Vector3.right;
 		tangent = Vector3.Cross(up, normal).normalized;
 		bitangent = Vector3.Cross(normal, tangent);
+	}
+
+	private static bool IsHierarchyStatic(GameObject gameObject)
+	{
+		if (gameObject == null)
+			return false;
+
+		Transform current = gameObject.transform;
+		while (current != null)
+		{
+			if (current.gameObject.isStatic)
+				return true;
+
+			current = current.parent;
+		}
+
+		return false;
+	}
+
+	private static MethodInfo ResolveUrpAttenuationMethod()
+	{
+		MethodInfo[] methods = typeof(UniversalRenderPipeline).GetMethods(BindingFlags.Public | BindingFlags.Static);
+		for (int i = 0; i < methods.Length; ++i)
+		{
+			MethodInfo method = methods[i];
+			if (method.Name != "GetLightAttenuationAndSpotDirection")
+				continue;
+
+			ParameterInfo[] parameters = method.GetParameters();
+			if (parameters.Length < 6)
+				continue;
+
+			bool hasLightType = false;
+			bool hasRange = false;
+			bool hasMatrix = false;
+			int outVector4Count = 0;
+
+			for (int p = 0; p < parameters.Length; ++p)
+			{
+				ParameterInfo parameter = parameters[p];
+				Type paramType = parameter.ParameterType;
+				if (paramType == typeof(LightType))
+					hasLightType = true;
+				else if (paramType == typeof(Matrix4x4))
+					hasMatrix = true;
+				else if (paramType == typeof(float))
+					hasRange = true;
+				else if (parameter.IsOut && paramType == typeof(Vector4).MakeByRefType())
+					outVector4Count++;
+			}
+
+			if (hasLightType && hasRange && hasMatrix && outVector4Count >= 2)
+				return method;
+		}
+
+		return null;
+	}
+
+	private static bool TryGetUrpLightAttenuationAndSpotDirection(Light light, out Vector4 attenuation, out Vector3 spotDirection)
+	{
+		float rangeSq = Mathf.Max(light.range * light.range, 0.0001f);
+		attenuation = new Vector4(1.0f / rangeSq, 0.0f, 0.0f, 1.0f);
+		spotDirection = -light.transform.forward.normalized;
+
+		if (light.type == LightType.Spot)
+		{
+			float outerCos = Mathf.Cos(0.5f * Mathf.Deg2Rad * light.spotAngle);
+			float innerSpotAngle = Mathf.Min(light.innerSpotAngle, light.spotAngle);
+			float innerCos = Mathf.Cos(0.5f * Mathf.Deg2Rad * innerSpotAngle);
+			float denom = Mathf.Max(0.0001f, innerCos - outerCos);
+			attenuation.z = 1.0f / denom;
+			attenuation.w = -outerCos * attenuation.z;
+		}
+
+		MethodInfo method = UrpGetLightAttenuationAndSpotDirectionMethod;
+		if (method == null)
+			return false;
+
+		ParameterInfo[] parameters = method.GetParameters();
+		object[] args = new object[parameters.Length];
+		int floatParamIndex = 0;
+		List<int> outVectorIndices = new List<int>(2);
+
+		for (int i = 0; i < parameters.Length; ++i)
+		{
+			ParameterInfo parameter = parameters[i];
+			Type paramType = parameter.ParameterType;
+			bool isOutVector4 = parameter.IsOut && paramType == typeof(Vector4).MakeByRefType();
+			if (isOutVector4)
+			{
+				args[i] = null;
+				outVectorIndices.Add(i);
+				continue;
+			}
+
+			if (paramType == typeof(LightType))
+			{
+				args[i] = light.type;
+				continue;
+			}
+
+			if (paramType == typeof(Matrix4x4))
+			{
+				args[i] = light.transform.localToWorldMatrix;
+				continue;
+			}
+
+			if (paramType == typeof(float))
+			{
+				if (floatParamIndex == 0)
+					args[i] = light.range;
+				else if (floatParamIndex == 1)
+					args[i] = light.spotAngle;
+				else
+					args[i] = light.innerSpotAngle;
+
+				floatParamIndex++;
+				continue;
+			}
+
+			if (paramType == typeof(float?))
+			{
+				args[i] = light.type == LightType.Spot ? (float?)light.innerSpotAngle : null;
+				continue;
+			}
+
+			if (parameter.HasDefaultValue)
+			{
+				args[i] = parameter.DefaultValue;
+			}
+			else
+			{
+				Type targetType = paramType.IsByRef ? paramType.GetElementType() : paramType;
+				args[i] = targetType != null && targetType.IsValueType ? Activator.CreateInstance(targetType) : null;
+			}
+		}
+
+		try
+		{
+			method.Invoke(null, args);
+			if (outVectorIndices.Count < 2)
+				return false;
+
+			Vector4 outAttenuation = (Vector4)args[outVectorIndices[0]];
+			Vector4 outSpotDirection = (Vector4)args[outVectorIndices[1]];
+			attenuation = outAttenuation;
+			Vector3 spotDir = new Vector3(outSpotDirection.x, outSpotDirection.y, outSpotDirection.z);
+			spotDirection = spotDir.sqrMagnitude > 0.000001f ? spotDir.normalized : spotDirection;
+			return true;
+		}
+		catch
+		{
+			return false;
+		}
 	}
 
 	private static bool IsLightConfiguredAsBaked(Light light)

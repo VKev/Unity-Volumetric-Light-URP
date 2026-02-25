@@ -17,6 +17,8 @@
 #include "./VolumetricShadows.hlsl"
 #include "./ProjectionUtils.hlsl"
 
+#define MAX_BAKED_STATIC_LIGHTS 64
+
 int _FrameCount;
 uint _CustomAdditionalLightsCount;
 float _Distance;
@@ -32,11 +34,20 @@ int _MaxSteps;
 float4 _BakedVolumetricFogBoundsMin;
 float4 _BakedVolumetricFogBoundsSizeInv;
 float _BakedVolumetricFogIntensity;
+int _BakedStaticLightsCount;
 
 TEXTURE3D(_BakedVolumetricFogLightingTex);
 SAMPLER(sampler_BakedVolumetricFogLightingTex);
 TEXTURE3D(_BakedVolumetricFogDirectionTex);
 SAMPLER(sampler_BakedVolumetricFogDirectionTex);
+TEXTURE3D_ARRAY(_BakedStaticVisibilityTexArray);
+SAMPLER(sampler_BakedStaticVisibilityTexArray);
+
+float4 _BakedStaticLightColors[MAX_BAKED_STATIC_LIGHTS];
+float4 _BakedStaticLightPositions[MAX_BAKED_STATIC_LIGHTS];
+float4 _BakedStaticLightDirections[MAX_BAKED_STATIC_LIGHTS];
+float4 _BakedStaticLightParams0[MAX_BAKED_STATIC_LIGHTS];
+float4 _BakedStaticLightParams1[MAX_BAKED_STATIC_LIGHTS];
 
 float _Anisotropies[MAX_VISIBLE_LIGHTS + 1];
 float _Scatterings[MAX_VISIBLE_LIGHTS + 1];
@@ -141,6 +152,76 @@ float3 GetStepAdaptiveProbeVolumeEvaluation(float2 uv, float3 posWS, float densi
 #endif
  
     return (float3)apvDiffuseGI;
+}
+
+// Gets the baked volumetric lighting evaluation at one raymarch step.
+float3 GetStepBakedStaticLightsColor(float3 currPosWS, float3 rd, float density)
+{
+#if _BAKED_STATIC_LIGHTS_RUNTIME_EVAL
+    float3 bakedUv = (currPosWS - _BakedVolumetricFogBoundsMin.xyz) * _BakedVolumetricFogBoundsSizeInv.xyz;
+    UNITY_BRANCH
+    if (any(bakedUv < 0.0) || any(bakedUv > 1.0))
+        return float3(0.0, 0.0, 0.0);
+
+    float3 staticLightsColor = float3(0.0, 0.0, 0.0);
+    int bakedLightsCount = min(_BakedStaticLightsCount, MAX_BAKED_STATIC_LIGHTS);
+
+    UNITY_LOOP
+    for (int i = 0; i < bakedLightsCount; ++i)
+    {
+        float4 color = _BakedStaticLightColors[i];
+        float4 position = _BakedStaticLightPositions[i];
+        float4 directionData = _BakedStaticLightDirections[i];
+        float4 params0 = _BakedStaticLightParams0[i]; // xy: distance attenuation params, zw: spot attenuation params
+        float4 params1 = _BakedStaticLightParams1[i]; // x: radiusSq, y: scattering, z: anisotropy, w: lightType
+
+        float3 directionToLight = float3(0.0, 0.0, 1.0);
+        float attenuation = 1.0;
+        float lightType = params1.w;
+
+        UNITY_BRANCH
+        if (lightType > 0.5 && lightType < 1.5) // Directional
+        {
+            directionToLight = -normalize(directionData.xyz);
+        }
+        else // Spot or point
+        {
+            float3 toLight = position.xyz - currPosWS;
+            float distanceSq = dot(toLight, toLight);
+            UNITY_BRANCH
+            if (distanceSq >= position.w)
+                continue;
+
+            float safeDistanceSq = max(distanceSq, 0.000001);
+            directionToLight = toLight * rsqrt(safeDistanceSq);
+            attenuation = DistanceAttenuation(safeDistanceSq, params0.xy);
+
+            UNITY_BRANCH
+            if (lightType < 0.5) // Spot
+            {
+                attenuation *= AngleAttenuation(normalize(directionData.xyz), directionToLight, params0.zw);
+            }
+
+            float radialFade = smoothstep(0.0, max(params1.x, 0.000001), safeDistanceSq);
+            radialFade *= radialFade;
+            attenuation *= radialFade;
+        }
+
+        float visibility = SAMPLE_TEXTURE3D_ARRAY(_BakedStaticVisibilityTexArray, sampler_BakedStaticVisibilityTexArray, float4(bakedUv, i)).r;
+        attenuation *= visibility;
+        UNITY_BRANCH
+        if (attenuation <= 0.000001)
+            continue;
+
+        float anisotropy = params1.z;
+        float phase = CornetteShanksPhaseFunction(anisotropy, dot(rd, directionToLight));
+        staticLightsColor += color.rgb * (attenuation * phase * density * params1.y);
+    }
+
+    return staticLightsColor * _BakedVolumetricFogIntensity;
+#else
+    return float3(0.0, 0.0, 0.0);
+#endif
 }
 
 // Gets the baked volumetric lighting evaluation at one raymarch step.
@@ -375,12 +456,13 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         transmittance *= stepAttenuation;
 
         half3 apvColor = (half3)GetStepAdaptiveProbeVolumeEvaluation(uv, currPosWS, density);
+        half3 bakedStaticLightsColor = (half3)GetStepBakedStaticLightsColor(currPosWS, rd, density);
         half3 bakedColor = (half3)GetStepBakedLightingColor(currPosWS, rd, density);
         half3 mainLightColor = (half3)GetStepMainLightColor(currPosWS, phaseMainLight, density);
         half3 additionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density);
         
         // TODO: Additional contributions? Reflection probes, etc...
-        half3 stepColor = apvColor + bakedColor + mainLightColor + additionalLightsColor;
+        half3 stepColor = apvColor + bakedStaticLightsColor + bakedColor + mainLightColor + additionalLightsColor;
         volumetricFogColor += ((float3)stepColor * (transmittance * stepLength));
 
         UNITY_BRANCH

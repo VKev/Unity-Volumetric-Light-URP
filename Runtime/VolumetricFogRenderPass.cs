@@ -92,9 +92,16 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int DebugColorId = Shader.PropertyToID("_Color");
 	private static readonly int BakedVolumetricFogLightingTextureId = Shader.PropertyToID("_BakedVolumetricFogLightingTex");
 	private static readonly int BakedVolumetricFogDirectionTextureId = Shader.PropertyToID("_BakedVolumetricFogDirectionTex");
+	private static readonly int BakedStaticVisibilityTextureArrayId = Shader.PropertyToID("_BakedStaticVisibilityTexArray");
 	private static readonly int BakedVolumetricFogBoundsMinId = Shader.PropertyToID("_BakedVolumetricFogBoundsMin");
 	private static readonly int BakedVolumetricFogBoundsSizeInvId = Shader.PropertyToID("_BakedVolumetricFogBoundsSizeInv");
 	private static readonly int BakedVolumetricFogIntensityId = Shader.PropertyToID("_BakedVolumetricFogIntensity");
+	private static readonly int BakedStaticLightsCountId = Shader.PropertyToID("_BakedStaticLightsCount");
+	private static readonly int BakedStaticLightColorsArrayId = Shader.PropertyToID("_BakedStaticLightColors");
+	private static readonly int BakedStaticLightPositionsArrayId = Shader.PropertyToID("_BakedStaticLightPositions");
+	private static readonly int BakedStaticLightDirectionsArrayId = Shader.PropertyToID("_BakedStaticLightDirections");
+	private static readonly int BakedStaticLightParams0ArrayId = Shader.PropertyToID("_BakedStaticLightParams0");
+	private static readonly int BakedStaticLightParams1ArrayId = Shader.PropertyToID("_BakedStaticLightParams1");
 	private static readonly int BakedFroxelLightingBufferId = Shader.PropertyToID("_BakedFroxelLightingBuffer");
 	private static readonly int BakedFroxelDirectionBufferId = Shader.PropertyToID("_BakedFroxelDirectionBuffer");
 
@@ -128,6 +135,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private const int FroxelGridDepth = 24;
 	private const int FroxelMaxLightsPerCell = 24;
 	private const int FroxelCount = FroxelGridWidth * FroxelGridHeight * FroxelGridDepth;
+	private const int MaxBakedStaticLights = 64;
 	private const float MinAdditionalLightScattering = 0.0001f;
 	private const float MinAdditionalLightIntensity = 0.001f;
 	private static int LightsParametersLength = MaxVisibleAdditionalLights + 1;
@@ -147,6 +155,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly FroxelMeta[] FroxelMetas = new FroxelMeta[FroxelCount];
 	private static readonly int[] FroxelLightIndices = new int[FroxelCount * FroxelMaxLightsPerCell];
 	private static readonly int[] FroxelCellLightCounts = new int[FroxelCount];
+	private static readonly Vector4[] BakedStaticLightColors = new Vector4[MaxBakedStaticLights];
+	private static readonly Vector4[] BakedStaticLightPositions = new Vector4[MaxBakedStaticLights];
+	private static readonly Vector4[] BakedStaticLightDirections = new Vector4[MaxBakedStaticLights];
+	private static readonly Vector4[] BakedStaticLightParams0 = new Vector4[MaxBakedStaticLights];
+	private static readonly Vector4[] BakedStaticLightParams1 = new Vector4[MaxBakedStaticLights];
 
 	private static ComputeBuffer froxelMetaBuffer;
 	private static ComputeBuffer froxelLightIndicesBuffer;
@@ -197,6 +210,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static bool cachedMainLightContributionEnabled;
 	private static bool cachedAdditionalLightsContributionEnabled;
 	private static bool cachedBakedVolumetricLightingEnabled;
+	private static bool cachedBakedStaticLightsEnabled;
 	private static bool cachedBakedDirectionalPhaseEnabled;
 	private static bool cachedBakedFroxelSamplingEnabled;
 	private static bool cachedSceneViewMainCameraFrustumMaskEnabled;
@@ -209,6 +223,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static int cachedMainCameraFrustumPlanesHash;
 	private static int cachedFroxelHash;
 	private static int cachedBakedFroxelHash;
+	private static int cachedBakedStaticLightsHash;
 	private static float cachedDistance;
 	private static float cachedBaseHeight;
 	private static float cachedMaximumHeight;
@@ -534,8 +549,18 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		bool useHybridBakedMode = fogVolume.lightingMode.value == VolumetricFogLightingMode.HybridBaked;
 		VolumetricFogBakedData bakedLightingData = useHybridBakedMode ? fogVolume.bakedData.value : null;
-		bool hasValidBakedLightingData = useHybridBakedMode && bakedLightingData != null && bakedLightingData.IsValid && bakedLightingData.BakedLightsCount > 0 && fogVolume.bakedIntensity.value > 0.0f;
-		bool classifyLightsByBakeType = hasValidBakedLightingData;
+		bool hasValidBakedStaticLightsData = useHybridBakedMode
+			&& bakedLightingData != null
+			&& bakedLightingData.HasStaticLightsData
+			&& bakedLightingData.BakedLightsCount > 0
+			&& fogVolume.bakedIntensity.value > 0.0f;
+		bool hasValidBakedLightingData = useHybridBakedMode
+			&& bakedLightingData != null
+			&& bakedLightingData.IsValid
+			&& bakedLightingData.BakedLightsCount > 0
+			&& fogVolume.bakedIntensity.value > 0.0f
+			&& !hasValidBakedStaticLightsData;
+		bool classifyLightsByBakeType = hasValidBakedLightingData || hasValidBakedStaticLightsData;
 
 		if (!isMaterialStateInitialized || cachedBakedVolumetricLightingEnabled != hasValidBakedLightingData)
 		{
@@ -548,6 +573,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		}
 
 		UploadBakedVolumetricLightingParameters(volumetricFogMaterial, bakedLightingData, hasValidBakedLightingData, fogVolume.bakedIntensity.value);
+		UploadBakedStaticLightsParameters(volumetricFogMaterial, bakedLightingData, hasValidBakedStaticLightsData, fogVolume.bakedIntensity.value);
 		bool enableBakedFroxelSampling = hasValidBakedLightingData && fogVolume.bakedUseFroxelSampling.value;
 		int bakedFroxelHash = 0;
 		if (enableBakedFroxelSampling)
@@ -710,6 +736,142 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		}
 
 		SetFloatIfChanged(material, BakedVolumetricFogIntensityId, safeIntensity, ref cachedBakedVolumetricFogIntensity);
+	}
+
+	/// <summary>
+	/// Uploads baked static lights data (with precomputed visibility volumes) for runtime camera-dependent evaluation.
+	/// </summary>
+	/// <param name="material"></param>
+	/// <param name="bakedLightingData"></param>
+	/// <param name="enabled"></param>
+	/// <param name="intensity"></param>
+	private static void UploadBakedStaticLightsParameters(Material material, VolumetricFogBakedData bakedLightingData, bool enabled, float intensity)
+	{
+		if (!enabled || bakedLightingData == null || bakedLightingData.StaticVisibilityTextureArray == null || bakedLightingData.StaticLights == null || bakedLightingData.StaticLights.Length == 0)
+		{
+			if (!isMaterialStateInitialized || cachedBakedStaticLightsEnabled)
+			{
+				material.DisableKeyword("_BAKED_STATIC_LIGHTS_RUNTIME_EVAL");
+				material.SetInteger(BakedStaticLightsCountId, 0);
+				material.SetTexture(BakedStaticVisibilityTextureArrayId, null);
+				cachedBakedStaticLightsEnabled = false;
+				cachedBakedStaticLightsHash = int.MinValue;
+			}
+
+			return;
+		}
+
+		Texture3DArray visibilityTextureArray = bakedLightingData.StaticVisibilityTextureArray;
+		VolumetricFogBakedStaticLightData[] staticLights = bakedLightingData.StaticLights;
+		int staticLightsCount = Mathf.Min(staticLights.Length, MaxBakedStaticLights, visibilityTextureArray.volumeDepth);
+		float safeIntensity = Mathf.Max(0.0f, intensity);
+
+		if (staticLightsCount <= 0)
+		{
+			if (!isMaterialStateInitialized || cachedBakedStaticLightsEnabled)
+			{
+				material.DisableKeyword("_BAKED_STATIC_LIGHTS_RUNTIME_EVAL");
+				material.SetInteger(BakedStaticLightsCountId, 0);
+				material.SetTexture(BakedStaticVisibilityTextureArrayId, null);
+				cachedBakedStaticLightsEnabled = false;
+				cachedBakedStaticLightsHash = int.MinValue;
+			}
+
+			return;
+		}
+
+		int hash = ComputeBakedStaticLightsHash(bakedLightingData, staticLightsCount, safeIntensity);
+		if (!isMaterialStateInitialized || !cachedBakedStaticLightsEnabled)
+		{
+			material.EnableKeyword("_BAKED_STATIC_LIGHTS_RUNTIME_EVAL");
+			cachedBakedStaticLightsEnabled = true;
+		}
+
+		SetFloatIfChanged(material, BakedVolumetricFogIntensityId, safeIntensity, ref cachedBakedVolumetricFogIntensity);
+
+		if (!isMaterialStateInitialized || hash != cachedBakedStaticLightsHash)
+		{
+			Vector3 boundsSize = bakedLightingData.BoundsSize;
+			Vector3 boundsCenter = bakedLightingData.BoundsCenter;
+			Vector3 boundsMin = boundsCenter - (boundsSize * 0.5f);
+			Vector3 boundsSizeInv = new Vector3(1.0f / boundsSize.x, 1.0f / boundsSize.y, 1.0f / boundsSize.z);
+
+			for (int i = 0; i < staticLightsCount; ++i)
+			{
+				VolumetricFogBakedStaticLightData lightData = staticLights[i];
+				Vector4 attenuation = lightData.attenuation;
+				if (attenuation == Vector4.zero)
+				{
+					float invRangeSq = lightData.invRangeSq > 0.0f ? lightData.invRangeSq : (lightData.rangeSq > 0.0001f ? 1.0f / lightData.rangeSq : 0.0f);
+					attenuation = new Vector4(invRangeSq, 0.0f, 0.0f, 1.0f);
+					if (lightData.lightType == (int)LightType.Spot)
+					{
+						attenuation.z = lightData.spotScale;
+						attenuation.w = lightData.spotOffset;
+					}
+				}
+
+				BakedStaticLightColors[i] = new Vector4(lightData.color.x, lightData.color.y, lightData.color.z, 1.0f);
+				BakedStaticLightPositions[i] = new Vector4(lightData.position.x, lightData.position.y, lightData.position.z, lightData.rangeSq);
+				BakedStaticLightDirections[i] = new Vector4(lightData.direction.x, lightData.direction.y, lightData.direction.z, 0.0f);
+				BakedStaticLightParams0[i] = attenuation;
+				BakedStaticLightParams1[i] = new Vector4(lightData.radiusSq, lightData.scattering, lightData.anisotropy, lightData.lightType);
+			}
+
+			material.SetInteger(BakedStaticLightsCountId, staticLightsCount);
+			material.SetTexture(BakedStaticVisibilityTextureArrayId, visibilityTextureArray);
+			material.SetVectorArray(BakedStaticLightColorsArrayId, BakedStaticLightColors);
+			material.SetVectorArray(BakedStaticLightPositionsArrayId, BakedStaticLightPositions);
+			material.SetVectorArray(BakedStaticLightDirectionsArrayId, BakedStaticLightDirections);
+			material.SetVectorArray(BakedStaticLightParams0ArrayId, BakedStaticLightParams0);
+			material.SetVectorArray(BakedStaticLightParams1ArrayId, BakedStaticLightParams1);
+			material.SetVector(BakedVolumetricFogBoundsMinId, new Vector4(boundsMin.x, boundsMin.y, boundsMin.z, 0.0f));
+			material.SetVector(BakedVolumetricFogBoundsSizeInvId, new Vector4(boundsSizeInv.x, boundsSizeInv.y, boundsSizeInv.z, 0.0f));
+			cachedBakedStaticLightsHash = hash;
+		}
+	}
+
+	/// <summary>
+	/// Computes a hash of baked static lights bindings.
+	/// </summary>
+	/// <param name="bakedLightingData"></param>
+	/// <param name="staticLightsCount"></param>
+	/// <param name="intensity"></param>
+	/// <returns></returns>
+	private static int ComputeBakedStaticLightsHash(VolumetricFogBakedData bakedLightingData, int staticLightsCount, float intensity)
+	{
+		unchecked
+		{
+			int hash = 17;
+			hash = (hash * 31) + staticLightsCount;
+			hash = (hash * 31) + Mathf.Max(0.0f, intensity).GetHashCode();
+			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedLightingData != null && bakedLightingData.StaticVisibilityTextureArray != null ? bakedLightingData.StaticVisibilityTextureArray.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedLightingData != null && bakedLightingData.StaticVisibilityTextureArray != null ? bakedLightingData.StaticVisibilityTextureArray.imageContentsHash.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.BoundsCenter.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.BoundsSize.GetHashCode() : 0);
+			if (bakedLightingData != null && bakedLightingData.StaticLights != null)
+			{
+				VolumetricFogBakedStaticLightData[] staticLights = bakedLightingData.StaticLights;
+				for (int i = 0; i < staticLightsCount && i < staticLights.Length; ++i)
+				{
+					VolumetricFogBakedStaticLightData lightData = staticLights[i];
+					hash = (hash * 31) + lightData.lightType;
+					hash = (hash * 31) + lightData.color.GetHashCode();
+					hash = (hash * 31) + lightData.position.GetHashCode();
+					hash = (hash * 31) + lightData.direction.GetHashCode();
+					hash = (hash * 31) + lightData.attenuation.GetHashCode();
+					hash = (hash * 31) + lightData.rangeSq.GetHashCode();
+					hash = (hash * 31) + lightData.invRangeSq.GetHashCode();
+					hash = (hash * 31) + lightData.radiusSq.GetHashCode();
+					hash = (hash * 31) + lightData.scattering.GetHashCode();
+					hash = (hash * 31) + lightData.anisotropy.GetHashCode();
+					hash = (hash * 31) + lightData.spotScale.GetHashCode();
+					hash = (hash * 31) + lightData.spotOffset.GetHashCode();
+				}
+			}
+			return hash;
+		}
 	}
 
 	/// <summary>
@@ -2006,6 +2168,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedMainLightContributionEnabled = false;
 		cachedAdditionalLightsContributionEnabled = false;
 		cachedBakedVolumetricLightingEnabled = false;
+		cachedBakedStaticLightsEnabled = false;
 		cachedBakedDirectionalPhaseEnabled = false;
 		cachedBakedFroxelSamplingEnabled = false;
 		cachedSceneViewMainCameraFrustumMaskEnabled = false;
@@ -2018,6 +2181,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedMainCameraFrustumPlanesHash = int.MinValue;
 		cachedFroxelHash = int.MinValue;
 		cachedBakedFroxelHash = int.MinValue;
+		cachedBakedStaticLightsHash = int.MinValue;
 		cachedDistance = float.NaN;
 		cachedBaseHeight = float.NaN;
 		cachedMaximumHeight = float.NaN;

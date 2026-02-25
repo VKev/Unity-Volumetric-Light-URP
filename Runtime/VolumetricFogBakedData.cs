@@ -1,4 +1,37 @@
+using System;
 using UnityEngine;
+
+/// <summary>
+/// Serialized baked static light data used by hybrid baked runtime evaluation.
+/// </summary>
+[Serializable]
+public struct VolumetricFogBakedStaticLightData
+{
+	[Tooltip("UnityEngine.LightType numeric value.")]
+	public int lightType;
+	[Tooltip("Linear light color multiplied by light intensity.")]
+	public Vector3 color;
+	[Tooltip("World-space light position.")]
+	public Vector3 position;
+	[Tooltip("World-space light forward direction.")]
+	public Vector3 direction;
+	[Tooltip("URP additional light attenuation params (xy distance attenuation, zw spot attenuation).")]
+	public Vector4 attenuation;
+	[Tooltip("Sqr range used for range clipping.")]
+	public float rangeSq;
+	[Tooltip("Inverse range squared used by URP distance attenuation.")]
+	public float invRangeSq;
+	[Tooltip("Additional light near-origin smoothing radius squared.")]
+	public float radiusSq;
+	[Tooltip("Volumetric scattering weight for this baked light.")]
+	public float scattering;
+	[Tooltip("Anisotropy parameter for this baked light.")]
+	public float anisotropy;
+	[Tooltip("Spot attenuation scale.")]
+	public float spotScale;
+	[Tooltip("Spot attenuation offset.")]
+	public float spotOffset;
+}
 
 /// <summary>
 /// Holds baked volumetric lighting data sampled by the fog shader.
@@ -12,6 +45,10 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	[SerializeField] private Texture3D lightingTexture;
 	[Tooltip("3D texture containing baked dominant lighting direction in RGB.")]
 	[SerializeField] private Texture3D directionTexture;
+	[Tooltip("3D array storing precomputed shadow visibility per baked static light (one volume slice per light).")]
+	[SerializeField] private Texture3DArray staticVisibilityTextureArray;
+	[Tooltip("Serialized static baked light parameters used at runtime with the precomputed visibility volume.")]
+	[SerializeField] private VolumetricFogBakedStaticLightData[] staticLights = Array.Empty<VolumetricFogBakedStaticLightData>();
 	[Tooltip("World-space center of the baked volume bounds.")]
 	[SerializeField] private Vector3 boundsCenter = new Vector3(0.0f, 8.0f, 0.0f);
 	[Tooltip("World-space size of the baked volume bounds.")]
@@ -28,6 +65,8 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	[SerializeField] private bool enableShadowOcclusion = true;
 	[Tooltip("Layer mask used to test baked shadow occlusion against colliders.")]
 	[SerializeField] private LayerMask occluderLayerMask = ~0;
+	[Tooltip("When enabled, baked shadow rays will only consider static scene geometry as occluders.")]
+	[SerializeField] private bool staticOccludersOnly = true;
 	[Tooltip("When enabled, temporary mesh colliders are created for MeshRenderers that have no Collider so shadow bake can include render geometry too.")]
 	[SerializeField] private bool createTemporaryMeshColliders = true;
 	[Tooltip("Bias used on baked shadow rays to avoid immediate self-hits.")]
@@ -49,6 +88,9 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 
 	public Texture3D LightingTexture => lightingTexture;
 	public Texture3D DirectionTexture => directionTexture;
+	public Texture3DArray StaticVisibilityTextureArray => staticVisibilityTextureArray;
+	public VolumetricFogBakedStaticLightData[] StaticLights => staticLights;
+	public int StaticLightsCount => staticLights != null ? staticLights.Length : 0;
 	public Vector3 BoundsCenter => boundsCenter;
 	public Vector3 BoundsSize => boundsSize;
 	public int ResolutionX => resolutionX;
@@ -58,6 +100,7 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	public int BakedLightsCount => bakedLightsCount;
 	public bool EnableShadowOcclusion => enableShadowOcclusion;
 	public int OccluderLayerMask => occluderLayerMask.value;
+	public bool StaticOccludersOnly => staticOccludersOnly;
 	public bool CreateTemporaryMeshColliders => createTemporaryMeshColliders;
 	public float ShadowRayBias => shadowRayBias;
 	public float DirectionalShadowDistance => directionalShadowDistance;
@@ -66,11 +109,30 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	public float DirectionalSoftShadowConeAngle => directionalSoftShadowConeAngle;
 	public float PunctualSoftShadowConeAngle => punctualSoftShadowConeAngle;
 
+	public bool HasStaticLightsData
+	{
+		get
+		{
+			return staticVisibilityTextureArray != null
+				&& staticLights != null
+				&& staticLights.Length > 0
+				&& staticVisibilityTextureArray.volumeDepth >= staticLights.Length;
+		}
+	}
+
 	public bool IsValid
 	{
 		get
 		{
-			return lightingTexture != null && lightingTexture.depth > 1 && boundsSize.x > 0.0001f && boundsSize.y > 0.0001f && boundsSize.z > 0.0001f && resolutionX >= 4 && resolutionY >= 4 && resolutionZ >= 4;
+			bool hasLegacyBakedVolumes = lightingTexture != null && lightingTexture.depth > 1;
+			bool hasStaticBakedVolumes = HasStaticLightsData;
+			return (hasLegacyBakedVolumes || hasStaticBakedVolumes)
+				&& boundsSize.x > 0.0001f
+				&& boundsSize.y > 0.0001f
+				&& boundsSize.z > 0.0001f
+				&& resolutionX >= 4
+				&& resolutionY >= 4
+				&& resolutionZ >= 4;
 		}
 	}
 
@@ -86,6 +148,22 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	public void SetDirectionTexture(Texture3D texture)
 	{
 		directionTexture = texture;
+	}
+
+	public void SetStaticVisibilityTextureArray(Texture3DArray textureArray)
+	{
+		staticVisibilityTextureArray = textureArray;
+	}
+
+	public void SetStaticLights(VolumetricFogBakedStaticLightData[] bakedLights)
+	{
+		staticLights = bakedLights ?? Array.Empty<VolumetricFogBakedStaticLightData>();
+	}
+
+	public void ClearStaticLightsData()
+	{
+		staticVisibilityTextureArray = null;
+		staticLights = Array.Empty<VolumetricFogBakedStaticLightData>();
 	}
 
 	public void SetBakedLightsCount(int count)
@@ -111,6 +189,8 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 		softShadowSampleCount = Mathf.Clamp(softShadowSampleCount, 1, 16);
 		directionalSoftShadowConeAngle = Mathf.Clamp(directionalSoftShadowConeAngle, 0.0f, 10.0f);
 		punctualSoftShadowConeAngle = Mathf.Clamp(punctualSoftShadowConeAngle, 0.0f, 10.0f);
+		if (staticLights == null)
+			staticLights = Array.Empty<VolumetricFogBakedStaticLightData>();
 	}
 
 	#endregion
