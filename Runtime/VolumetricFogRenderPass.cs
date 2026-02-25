@@ -83,7 +83,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int SceneViewMainCameraFrustumMaskEnabledId = Shader.PropertyToID("_SceneViewMainCameraFrustumMaskEnabled");
 	private static readonly int MainCameraFrustumPlanesId = Shader.PropertyToID("_MainCameraFrustumPlanes");
 	private static readonly int DebugColorId = Shader.PropertyToID("_Color");
-	private static readonly int DebugBaseColorId = Shader.PropertyToID("_BaseColor");
 
 	private static readonly int FrameCountId = Shader.PropertyToID("_FrameCount");
 	private static readonly int CustomAdditionalLightsCountId = Shader.PropertyToID("_CustomAdditionalLightsCount");
@@ -163,7 +162,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static Color debugFroxelColor = new Color(0.0f, 1.0f, 1.0f, 1.0f);
 	private static Material debugSolidCubeMaterial;
 	private static Mesh debugUnitCubeMesh;
-	private static MaterialPropertyBlock debugSolidCubePropertyBlock;
 
 	private static bool isMaterialStateInitialized;
 	private static bool cachedMainLightContributionEnabled;
@@ -1083,13 +1081,12 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		Color fillColor = color;
 		fillColor.a = Mathf.Clamp01(debugWorldSpaceCubeFillOpacity * Mathf.Max(debugFroxelColor.a, 0.0001f));
-
-		debugSolidCubePropertyBlock.SetColor(DebugColorId, fillColor);
-		debugSolidCubePropertyBlock.SetColor(DebugBaseColorId, fillColor);
+		debugSolidCubeMaterial.SetColor(DebugColorId, fillColor);
 
 		Vector3 scale = Vector3.one * (halfExtent * 2.0f);
 		Matrix4x4 matrix = Matrix4x4.TRS(center, Quaternion.identity, scale);
-		Graphics.DrawMesh(debugUnitCubeMesh, matrix, debugSolidCubeMaterial, 0, camera, 0, debugSolidCubePropertyBlock, ShadowCastingMode.Off, false);
+		if (debugSolidCubeMaterial.SetPass(0))
+			Graphics.DrawMeshNow(debugUnitCubeMesh, matrix);
 	}
 
 	/// <summary>
@@ -1133,24 +1130,16 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	{
 		if (debugSolidCubeMaterial == null)
 		{
-			Shader debugShader = Shader.Find("Hidden/Internal-Colored");
+			Shader debugShader = Shader.Find("Hidden/VolumetricFogDebugSolid");
 			if (debugShader == null)
 				return false;
 
 			debugSolidCubeMaterial = new Material(debugShader);
 			debugSolidCubeMaterial.hideFlags = HideFlags.HideAndDontSave;
-			debugSolidCubeMaterial.SetInt("_SrcBlend", (int)BlendMode.SrcAlpha);
-			debugSolidCubeMaterial.SetInt("_DstBlend", (int)BlendMode.OneMinusSrcAlpha);
-			debugSolidCubeMaterial.SetInt("_Cull", (int)CullMode.Back);
-			debugSolidCubeMaterial.SetInt("_ZWrite", 0);
-			debugSolidCubeMaterial.SetInt("_ZTest", (int)CompareFunction.LessEqual);
 		}
 
 		if (debugUnitCubeMesh == null)
 			debugUnitCubeMesh = CreateUnitCubeMesh();
-
-		if (debugSolidCubePropertyBlock == null)
-			debugSolidCubePropertyBlock = new MaterialPropertyBlock();
 
 		return debugSolidCubeMaterial != null && debugUnitCubeMesh != null;
 	}
@@ -1210,7 +1199,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		}
 
 		debugUnitCubeMesh = null;
-		debugSolidCubePropertyBlock = null;
 	}
 
 	/// <summary>
