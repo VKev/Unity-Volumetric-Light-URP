@@ -49,6 +49,10 @@ float4 _FroxelNearFar;
 StructuredBuffer<int2> _FroxelMetaBuffer;
 StructuredBuffer<int> _FroxelLightIndicesBuffer;
 #endif
+#if defined(_BAKED_VOLUMETRIC_FROXEL_SAMPLING) && (SHADER_TARGET >= 45)
+StructuredBuffer<float4> _BakedFroxelLightingBuffer;
+StructuredBuffer<float4> _BakedFroxelDirectionBuffer;
+#endif
 
 // Computes the ray origin, direction, and returns the reconstructed world position for orthographic projection.
 float3 ComputeOrthographicParams(float2 uv, float depth, out float3 ro, out float3 rd)
@@ -144,17 +148,39 @@ float3 GetStepBakedLightingColor(float3 currPosWS, float3 rd, float density)
 {
 #if _BAKED_VOLUMETRIC_FOG_ENABLED
     const float isotropicPhase = 0.0795774715;
-    float3 bakedUv = (currPosWS - _BakedVolumetricFogBoundsMin.xyz) * _BakedVolumetricFogBoundsSizeInv.xyz;
-    UNITY_BRANCH
-    if (any(bakedUv < 0.0) || any(bakedUv > 1.0))
-        return float3(0.0, 0.0, 0.0);
+    float4 bakedLighting = float4(0.0, 0.0, 0.0, 0.5);
+    float3 bakedDirection = float3(0.0, 0.0, 1.0);
+    bool hasBakedSample = false;
 
-    float4 bakedLighting = SAMPLE_TEXTURE3D(_BakedVolumetricFogLightingTex, sampler_BakedVolumetricFogLightingTex, bakedUv);
+#if defined(_BAKED_VOLUMETRIC_FROXEL_SAMPLING) && (SHADER_TARGET >= 45)
+    int bakedFroxelIndex = GetFroxelIndex(currPosWS);
+    UNITY_BRANCH
+    if (bakedFroxelIndex >= 0)
+    {
+        bakedLighting = _BakedFroxelLightingBuffer[bakedFroxelIndex];
+        bakedDirection = _BakedFroxelDirectionBuffer[bakedFroxelIndex].xyz;
+        hasBakedSample = true;
+    }
+#endif
+
+    UNITY_BRANCH
+    if (!hasBakedSample)
+    {
+        float3 bakedUv = (currPosWS - _BakedVolumetricFogBoundsMin.xyz) * _BakedVolumetricFogBoundsSizeInv.xyz;
+        UNITY_BRANCH
+        if (any(bakedUv < 0.0) || any(bakedUv > 1.0))
+            return float3(0.0, 0.0, 0.0);
+
+        bakedLighting = SAMPLE_TEXTURE3D(_BakedVolumetricFogLightingTex, sampler_BakedVolumetricFogLightingTex, bakedUv);
+#if _BAKED_VOLUMETRIC_DIRECTIONAL_PHASE
+        bakedDirection = SAMPLE_TEXTURE3D(_BakedVolumetricFogDirectionTex, sampler_BakedVolumetricFogDirectionTex, bakedUv).rgb * 2.0 - 1.0;
+#endif
+    }
+
     float3 bakedColor = bakedLighting.rgb;
 
 #if _BAKED_VOLUMETRIC_DIRECTIONAL_PHASE
-    float anisotropy = bakedLighting.a * 2.0 - 1.0;
-    float3 bakedDirection = SAMPLE_TEXTURE3D(_BakedVolumetricFogDirectionTex, sampler_BakedVolumetricFogDirectionTex, bakedUv).rgb * 2.0 - 1.0;
+    float anisotropy = hasBakedSample ? bakedLighting.a : (bakedLighting.a * 2.0 - 1.0);
     float dirLengthSq = dot(bakedDirection, bakedDirection);
     UNITY_BRANCH
     if (dirLengthSq > 0.000001)
@@ -231,7 +257,7 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
     return (float3)((half3)additionalLight.color * (additionalLight.shadowAttenuation * additionalLight.distanceAttenuation * phase * density * newScattering));
 }
 
-#if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
+#if (defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) || defined(_BAKED_VOLUMETRIC_FROXEL_SAMPLING)) && (SHADER_TARGET >= 45)
 int GetFroxelIndex(float3 currPosWS)
 {
     float3 currPosVS = mul(UNITY_MATRIX_V, float4(currPosWS, 1.0)).xyz;

@@ -459,12 +459,13 @@ internal static class VolumetricFogBakedDataBaker
 		if (light == null)
 			return false;
 
-		LightmapBakeType bakingOutputType = light.bakingOutput.lightmapBakeType;
+		LightBakingOutput bakingOutput = light.bakingOutput;
+		LightmapBakeType bakingOutputType = bakingOutput.lightmapBakeType;
 #pragma warning disable 0618
 		LightmapBakeType configuredType = light.lightmapBakeType;
 #pragma warning restore 0618
 
-		return bakingOutputType == LightmapBakeType.Baked || configuredType == LightmapBakeType.Baked;
+		return bakingOutput.isBaked || bakingOutputType == LightmapBakeType.Baked || configuredType == LightmapBakeType.Baked;
 	}
 
 	private static bool TryCreateBakedDataAsset(out VolumetricFogBakedData bakedData)

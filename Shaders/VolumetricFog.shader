@@ -36,6 +36,7 @@ Shader "Hidden/VolumetricFog"
             #pragma multi_compile_local_fragment _ _FROXEL_CLUSTERED_ADDITIONAL_LIGHTS
             #pragma multi_compile_local_fragment _ _BAKED_VOLUMETRIC_FOG_ENABLED
             #pragma multi_compile_local_fragment _ _BAKED_VOLUMETRIC_DIRECTIONAL_PHASE
+            #pragma multi_compile_local_fragment _ _BAKED_VOLUMETRIC_FROXEL_SAMPLING
 
             #pragma vertex Vert
             #pragma fragment Frag

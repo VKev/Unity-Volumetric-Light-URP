@@ -95,6 +95,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int BakedVolumetricFogBoundsMinId = Shader.PropertyToID("_BakedVolumetricFogBoundsMin");
 	private static readonly int BakedVolumetricFogBoundsSizeInvId = Shader.PropertyToID("_BakedVolumetricFogBoundsSizeInv");
 	private static readonly int BakedVolumetricFogIntensityId = Shader.PropertyToID("_BakedVolumetricFogIntensity");
+	private static readonly int BakedFroxelLightingBufferId = Shader.PropertyToID("_BakedFroxelLightingBuffer");
+	private static readonly int BakedFroxelDirectionBufferId = Shader.PropertyToID("_BakedFroxelDirectionBuffer");
 
 	private static readonly int FrameCountId = Shader.PropertyToID("_FrameCount");
 	private static readonly int CustomAdditionalLightsCountId = Shader.PropertyToID("_CustomAdditionalLightsCount");
@@ -148,6 +150,17 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 	private static ComputeBuffer froxelMetaBuffer;
 	private static ComputeBuffer froxelLightIndicesBuffer;
+	private static ComputeBuffer bakedFroxelLightingBuffer;
+	private static ComputeBuffer bakedFroxelDirectionBuffer;
+	private static readonly Vector4[] BakedFroxelLightingData = new Vector4[FroxelCount];
+	private static readonly Vector4[] BakedFroxelDirectionData = new Vector4[FroxelCount];
+	private static Color[] bakedLightingPixelsCache;
+	private static Color[] bakedDirectionPixelsCache;
+	private static Texture3D cachedBakedLightingTexture;
+	private static Texture3D cachedBakedDirectionTexture;
+	private static int cachedBakedTextureWidth;
+	private static int cachedBakedTextureHeight;
+	private static int cachedBakedTextureDepth;
 
 	private int downsampleDepthPassIndex;
 	private int volumetricFogRenderPassIndex;
@@ -183,6 +196,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static bool cachedAdditionalLightsContributionEnabled;
 	private static bool cachedBakedVolumetricLightingEnabled;
 	private static bool cachedBakedDirectionalPhaseEnabled;
+	private static bool cachedBakedFroxelSamplingEnabled;
 	private static bool cachedSceneViewMainCameraFrustumMaskEnabled;
 	private static bool cachedFroxelClusteredLightsEnabled;
 #if UNITY_2023_1_OR_NEWER
@@ -192,6 +206,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static int cachedLightsHash;
 	private static int cachedMainCameraFrustumPlanesHash;
 	private static int cachedFroxelHash;
+	private static int cachedBakedFroxelHash;
 	private static float cachedDistance;
 	private static float cachedBaseHeight;
 	private static float cachedMaximumHeight;
@@ -531,6 +546,22 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		}
 
 		UploadBakedVolumetricLightingParameters(volumetricFogMaterial, bakedLightingData, hasValidBakedLightingData, fogVolume.bakedIntensity.value);
+		bool enableBakedFroxelSampling = hasValidBakedLightingData;
+		int bakedFroxelHash = 0;
+		if (enableBakedFroxelSampling)
+			enableBakedFroxelSampling = TryConfigureBakedFroxelSampling(volumetricFogMaterial, camera, bakedLightingData, debugRestrictToMainCameraFrustum, debugMainCameraFrustumPlanes, out bakedFroxelHash);
+
+		if (!isMaterialStateInitialized || cachedBakedFroxelSamplingEnabled != enableBakedFroxelSampling)
+		{
+			if (enableBakedFroxelSampling)
+				volumetricFogMaterial.EnableKeyword("_BAKED_VOLUMETRIC_FROXEL_SAMPLING");
+			else
+				volumetricFogMaterial.DisableKeyword("_BAKED_VOLUMETRIC_FROXEL_SAMPLING");
+
+			cachedBakedFroxelSamplingEnabled = enableBakedFroxelSampling;
+		}
+
+		cachedBakedFroxelHash = bakedFroxelHash;
 
 		bool enableMainLightContribution = fogVolume.enableMainLightContribution.value && fogVolume.scattering.value > 0.0f && mainLightIndex > -1;
 		if (enableMainLightContribution && classifyLightsByBakeType)
@@ -704,6 +735,314 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	}
 
 	/// <summary>
+	/// Configures baked froxel buffers from baked voxel textures for camera-view sampling.
+	/// </summary>
+	/// <param name="material"></param>
+	/// <param name="camera"></param>
+	/// <param name="bakedData"></param>
+	/// <param name="restrictToMainCameraFrustum"></param>
+	/// <param name="mainCameraFrustumPlanes"></param>
+	/// <param name="bakedFroxelHash"></param>
+	/// <returns></returns>
+	private static bool TryConfigureBakedFroxelSampling(Material material, Camera camera, VolumetricFogBakedData bakedData, bool restrictToMainCameraFrustum, Vector4[] mainCameraFrustumPlanes, out int bakedFroxelHash)
+	{
+		bakedFroxelHash = 0;
+		if (camera == null || bakedData == null || bakedData.LightingTexture == null || SystemInfo.graphicsShaderLevel < 45)
+			return false;
+
+		if (!TryEnsureBakedTextureCaches(bakedData))
+			return false;
+
+		EnsureBakedFroxelBuffersAllocated();
+		if (bakedFroxelLightingBuffer == null || bakedFroxelDirectionBuffer == null)
+			return false;
+
+		bakedFroxelHash = ComputeBakedFroxelInputHash(camera, bakedData, restrictToMainCameraFrustum, mainCameraFrustumPlanes);
+		if (!isMaterialStateInitialized || bakedFroxelHash != cachedBakedFroxelHash)
+		{
+			BuildBakedFroxelData(camera, bakedData, restrictToMainCameraFrustum, mainCameraFrustumPlanes);
+			bakedFroxelLightingBuffer.SetData(BakedFroxelLightingData);
+			bakedFroxelDirectionBuffer.SetData(BakedFroxelDirectionData);
+		}
+
+		material.SetBuffer(BakedFroxelLightingBufferId, bakedFroxelLightingBuffer);
+		material.SetBuffer(BakedFroxelDirectionBufferId, bakedFroxelDirectionBuffer);
+		material.SetVector(FroxelGridDimensionsId, new Vector4(FroxelGridWidth, FroxelGridHeight, FroxelGridDepth, FroxelMaxLightsPerCell));
+		material.SetVector(FroxelNearFarId, new Vector4(camera.nearClipPlane, camera.farClipPlane, 0.0f, 0.0f));
+		return true;
+	}
+
+	/// <summary>
+	/// Ensures CPU-side baked voxel texture caches are available.
+	/// </summary>
+	/// <param name="bakedData"></param>
+	/// <returns></returns>
+	private static bool TryEnsureBakedTextureCaches(VolumetricFogBakedData bakedData)
+	{
+		Texture3D lightingTexture = bakedData.LightingTexture;
+		Texture3D directionTexture = bakedData.DirectionTexture;
+		if (lightingTexture == null)
+			return false;
+
+		bool lightingTextureChanged = cachedBakedLightingTexture != lightingTexture
+			|| bakedLightingPixelsCache == null
+			|| cachedBakedTextureWidth != lightingTexture.width
+			|| cachedBakedTextureHeight != lightingTexture.height
+			|| cachedBakedTextureDepth != lightingTexture.depth;
+
+		if (lightingTextureChanged)
+		{
+			try
+			{
+				bakedLightingPixelsCache = lightingTexture.GetPixels();
+				cachedBakedLightingTexture = lightingTexture;
+				cachedBakedTextureWidth = lightingTexture.width;
+				cachedBakedTextureHeight = lightingTexture.height;
+				cachedBakedTextureDepth = lightingTexture.depth;
+			}
+			catch (Exception)
+			{
+				bakedLightingPixelsCache = null;
+				cachedBakedLightingTexture = null;
+				return false;
+			}
+		}
+
+		bool hasDirectionTexture = directionTexture != null
+			&& directionTexture.width == cachedBakedTextureWidth
+			&& directionTexture.height == cachedBakedTextureHeight
+			&& directionTexture.depth == cachedBakedTextureDepth;
+
+		if (!hasDirectionTexture)
+		{
+			bakedDirectionPixelsCache = null;
+			cachedBakedDirectionTexture = null;
+			return bakedLightingPixelsCache != null;
+		}
+
+		bool directionTextureChanged = cachedBakedDirectionTexture != directionTexture || bakedDirectionPixelsCache == null;
+		if (directionTextureChanged)
+		{
+			try
+			{
+				bakedDirectionPixelsCache = directionTexture.GetPixels();
+				cachedBakedDirectionTexture = directionTexture;
+			}
+			catch (Exception)
+			{
+				bakedDirectionPixelsCache = null;
+				cachedBakedDirectionTexture = null;
+			}
+		}
+
+		return bakedLightingPixelsCache != null;
+	}
+
+	/// <summary>
+	/// Ensures baked froxel buffers are allocated.
+	/// </summary>
+	private static void EnsureBakedFroxelBuffersAllocated()
+	{
+		if (bakedFroxelLightingBuffer == null || bakedFroxelLightingBuffer.count != FroxelCount || bakedFroxelLightingBuffer.stride != sizeof(float) * 4)
+		{
+			bakedFroxelLightingBuffer?.Release();
+			bakedFroxelLightingBuffer = new ComputeBuffer(FroxelCount, sizeof(float) * 4, ComputeBufferType.Structured);
+		}
+
+		if (bakedFroxelDirectionBuffer == null || bakedFroxelDirectionBuffer.count != FroxelCount || bakedFroxelDirectionBuffer.stride != sizeof(float) * 4)
+		{
+			bakedFroxelDirectionBuffer?.Release();
+			bakedFroxelDirectionBuffer = new ComputeBuffer(FroxelCount, sizeof(float) * 4, ComputeBufferType.Structured);
+		}
+	}
+
+	/// <summary>
+	/// Builds camera-view froxel lighting data from baked voxel textures.
+	/// </summary>
+	/// <param name="camera"></param>
+	/// <param name="bakedData"></param>
+	/// <param name="restrictToMainCameraFrustum"></param>
+	/// <param name="mainCameraFrustumPlanes"></param>
+	private static void BuildBakedFroxelData(Camera camera, VolumetricFogBakedData bakedData, bool restrictToMainCameraFrustum, Vector4[] mainCameraFrustumPlanes)
+	{
+		if (camera == null || bakedData == null || bakedLightingPixelsCache == null)
+		{
+			Array.Clear(BakedFroxelLightingData, 0, BakedFroxelLightingData.Length);
+			Array.Clear(BakedFroxelDirectionData, 0, BakedFroxelDirectionData.Length);
+			return;
+		}
+
+		float near = Mathf.Max(camera.nearClipPlane, 0.01f);
+		float far = Mathf.Max(camera.farClipPlane, near + 0.01f);
+		Vector3 boundsSize = bakedData.BoundsSize;
+		Vector3 boundsMin = bakedData.BoundsCenter - (boundsSize * 0.5f);
+		Vector3 boundsSizeInv = new Vector3(1.0f / boundsSize.x, 1.0f / boundsSize.y, 1.0f / boundsSize.z);
+
+		int index = 0;
+		for (int z = 0; z < FroxelGridDepth; ++z)
+		{
+			float depth = FroxelSliceToDepth01((z + 0.5f) / FroxelGridDepth, near, far);
+			for (int y = 0; y < FroxelGridHeight; ++y)
+			{
+				float v = (y + 0.5f) / FroxelGridHeight;
+				for (int x = 0; x < FroxelGridWidth; ++x, ++index)
+				{
+					float u = (x + 0.5f) / FroxelGridWidth;
+					Vector3 positionWS = camera.ViewportToWorldPoint(new Vector3(u, v, depth));
+
+					if (restrictToMainCameraFrustum && !IsPositionInsideFrustumPlanes(positionWS, mainCameraFrustumPlanes))
+					{
+						BakedFroxelLightingData[index] = Vector4.zero;
+						BakedFroxelDirectionData[index] = new Vector4(0.0f, 0.0f, 1.0f, 0.0f);
+						continue;
+					}
+
+					Vector3 uvw = (positionWS - boundsMin);
+					uvw.x *= boundsSizeInv.x;
+					uvw.y *= boundsSizeInv.y;
+					uvw.z *= boundsSizeInv.z;
+
+					if (uvw.x < 0.0f || uvw.x > 1.0f || uvw.y < 0.0f || uvw.y > 1.0f || uvw.z < 0.0f || uvw.z > 1.0f)
+					{
+						BakedFroxelLightingData[index] = Vector4.zero;
+						BakedFroxelDirectionData[index] = new Vector4(0.0f, 0.0f, 1.0f, 0.0f);
+						continue;
+					}
+
+					Color lighting = SampleBakedTextureTrilinear(bakedLightingPixelsCache, cachedBakedTextureWidth, cachedBakedTextureHeight, cachedBakedTextureDepth, uvw);
+					Color directionEncoded = bakedDirectionPixelsCache != null
+						? SampleBakedTextureTrilinear(bakedDirectionPixelsCache, cachedBakedTextureWidth, cachedBakedTextureHeight, cachedBakedTextureDepth, uvw)
+						: new Color(0.5f, 0.5f, 1.0f, 1.0f);
+
+					float anisotropy = Mathf.Clamp(lighting.a * 2.0f - 1.0f, -0.99f, 0.99f);
+					Vector3 direction = new Vector3(directionEncoded.r * 2.0f - 1.0f, directionEncoded.g * 2.0f - 1.0f, directionEncoded.b * 2.0f - 1.0f);
+					if (direction.sqrMagnitude > 0.000001f)
+						direction.Normalize();
+					else
+						direction = Vector3.forward;
+
+					BakedFroxelLightingData[index] = new Vector4(lighting.r, lighting.g, lighting.b, anisotropy);
+					BakedFroxelDirectionData[index] = new Vector4(direction.x, direction.y, direction.z, 0.0f);
+				}
+			}
+		}
+	}
+
+	/// <summary>
+	/// Samples a 3D texture represented by CPU pixel data using trilinear filtering.
+	/// </summary>
+	/// <param name="pixels"></param>
+	/// <param name="width"></param>
+	/// <param name="height"></param>
+	/// <param name="depth"></param>
+	/// <param name="uvw"></param>
+	/// <returns></returns>
+	private static Color SampleBakedTextureTrilinear(Color[] pixels, int width, int height, int depth, Vector3 uvw)
+	{
+		if (pixels == null || pixels.Length == 0 || width <= 0 || height <= 0 || depth <= 0)
+			return Color.clear;
+
+		float x = Mathf.Clamp01(uvw.x) * (width - 1);
+		float y = Mathf.Clamp01(uvw.y) * (height - 1);
+		float z = Mathf.Clamp01(uvw.z) * (depth - 1);
+
+		int x0 = Mathf.FloorToInt(x);
+		int y0 = Mathf.FloorToInt(y);
+		int z0 = Mathf.FloorToInt(z);
+		int x1 = Mathf.Min(x0 + 1, width - 1);
+		int y1 = Mathf.Min(y0 + 1, height - 1);
+		int z1 = Mathf.Min(z0 + 1, depth - 1);
+
+		float tx = x - x0;
+		float ty = y - y0;
+		float tz = z - z0;
+
+		Color c000 = GetPixel3D(pixels, width, height, x0, y0, z0);
+		Color c100 = GetPixel3D(pixels, width, height, x1, y0, z0);
+		Color c010 = GetPixel3D(pixels, width, height, x0, y1, z0);
+		Color c110 = GetPixel3D(pixels, width, height, x1, y1, z0);
+		Color c001 = GetPixel3D(pixels, width, height, x0, y0, z1);
+		Color c101 = GetPixel3D(pixels, width, height, x1, y0, z1);
+		Color c011 = GetPixel3D(pixels, width, height, x0, y1, z1);
+		Color c111 = GetPixel3D(pixels, width, height, x1, y1, z1);
+
+		Color c00 = Color.LerpUnclamped(c000, c100, tx);
+		Color c10 = Color.LerpUnclamped(c010, c110, tx);
+		Color c01 = Color.LerpUnclamped(c001, c101, tx);
+		Color c11 = Color.LerpUnclamped(c011, c111, tx);
+		Color c0 = Color.LerpUnclamped(c00, c10, ty);
+		Color c1 = Color.LerpUnclamped(c01, c11, ty);
+		return Color.LerpUnclamped(c0, c1, tz);
+	}
+
+	/// <summary>
+	/// Gets a texel from CPU-side 3D texture pixels.
+	/// </summary>
+	/// <param name="pixels"></param>
+	/// <param name="width"></param>
+	/// <param name="height"></param>
+	/// <param name="x"></param>
+	/// <param name="y"></param>
+	/// <param name="z"></param>
+	/// <returns></returns>
+	private static Color GetPixel3D(Color[] pixels, int width, int height, int x, int y, int z)
+	{
+		int index = x + y * width + z * width * height;
+		if (index < 0 || index >= pixels.Length)
+			return Color.clear;
+
+		return pixels[index];
+	}
+
+	/// <summary>
+	/// Computes the depth at a normalized logarithmic froxel slice coordinate.
+	/// </summary>
+	/// <param name="t"></param>
+	/// <param name="near"></param>
+	/// <param name="far"></param>
+	/// <returns></returns>
+	private static float FroxelSliceToDepth01(float t, float near, float far)
+	{
+		float clampedT = Mathf.Clamp01(t);
+		return near * Mathf.Exp(Mathf.Log(far / near) * clampedT);
+	}
+
+	/// <summary>
+	/// Computes baked froxel cache hash.
+	/// </summary>
+	/// <param name="camera"></param>
+	/// <param name="bakedData"></param>
+	/// <param name="restrictToMainCameraFrustum"></param>
+	/// <param name="mainCameraFrustumPlanes"></param>
+	/// <returns></returns>
+	private static int ComputeBakedFroxelInputHash(Camera camera, VolumetricFogBakedData bakedData, bool restrictToMainCameraFrustum, Vector4[] mainCameraFrustumPlanes)
+	{
+		unchecked
+		{
+			int hash = 17;
+			hash = (hash * 31) + (camera != null ? camera.transform.position.GetHashCode() : 0);
+			hash = (hash * 31) + (camera != null ? camera.transform.rotation.GetHashCode() : 0);
+			hash = (hash * 31) + (camera != null ? camera.fieldOfView.GetHashCode() : 0);
+			hash = (hash * 31) + (camera != null ? camera.aspect.GetHashCode() : 0);
+			hash = (hash * 31) + (camera != null ? camera.nearClipPlane.GetHashCode() : 0);
+			hash = (hash * 31) + (camera != null ? camera.farClipPlane.GetHashCode() : 0);
+			hash = (hash * 31) + (camera != null ? camera.orthographicSize.GetHashCode() : 0);
+			hash = (hash * 31) + (camera != null && camera.orthographic ? 1 : 0);
+			hash = (hash * 31) + (camera != null ? camera.pixelRect.width.GetHashCode() : 0);
+			hash = (hash * 31) + (camera != null ? camera.pixelRect.height.GetHashCode() : 0);
+			hash = (hash * 31) + (restrictToMainCameraFrustum ? 1 : 0);
+			if (restrictToMainCameraFrustum && mainCameraFrustumPlanes != null)
+				hash = (hash * 31) + ComputeVector4ArrayHash(mainCameraFrustumPlanes, mainCameraFrustumPlanes.Length);
+
+			hash = (hash * 31) + (bakedData != null && bakedData.LightingTexture != null ? bakedData.LightingTexture.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedData != null && bakedData.DirectionTexture != null ? bakedData.DirectionTexture.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedData != null ? bakedData.BoundsCenter.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedData != null ? bakedData.BoundsSize.GetHashCode() : 0);
+			return hash;
+		}
+	}
+
+	/// <summary>
 	/// Returns whether a visible light should still be evaluated in runtime fog shading.
 	/// </summary>
 	/// <param name="visibleLightIndex"></param>
@@ -731,11 +1070,12 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (light == null)
 			return false;
 
-		LightmapBakeType bakingOutputType = light.bakingOutput.lightmapBakeType;
+		LightBakingOutput bakingOutput = light.bakingOutput;
+		LightmapBakeType bakingOutputType = bakingOutput.lightmapBakeType;
 #pragma warning disable 0618
 		LightmapBakeType configuredType = light.lightmapBakeType;
 #pragma warning restore 0618
-		return bakingOutputType == LightmapBakeType.Baked || configuredType == LightmapBakeType.Baked;
+		return bakingOutput.isBaked || bakingOutputType == LightmapBakeType.Baked || configuredType == LightmapBakeType.Baked;
 	}
 
 	/// <summary>
@@ -1653,6 +1993,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedAdditionalLightsContributionEnabled = false;
 		cachedBakedVolumetricLightingEnabled = false;
 		cachedBakedDirectionalPhaseEnabled = false;
+		cachedBakedFroxelSamplingEnabled = false;
 		cachedSceneViewMainCameraFrustumMaskEnabled = false;
 		cachedFroxelClusteredLightsEnabled = false;
 #if UNITY_2023_1_OR_NEWER
@@ -1662,6 +2003,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedLightsHash = int.MinValue;
 		cachedMainCameraFrustumPlanesHash = int.MinValue;
 		cachedFroxelHash = int.MinValue;
+		cachedBakedFroxelHash = int.MinValue;
 		cachedDistance = float.NaN;
 		cachedBaseHeight = float.NaN;
 		cachedMaximumHeight = float.NaN;
@@ -1688,6 +2030,20 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		froxelLightIndicesBuffer?.Release();
 		froxelLightIndicesBuffer = null;
+
+		bakedFroxelLightingBuffer?.Release();
+		bakedFroxelLightingBuffer = null;
+
+		bakedFroxelDirectionBuffer?.Release();
+		bakedFroxelDirectionBuffer = null;
+
+		bakedLightingPixelsCache = null;
+		bakedDirectionPixelsCache = null;
+		cachedBakedLightingTexture = null;
+		cachedBakedDirectionTexture = null;
+		cachedBakedTextureWidth = 0;
+		cachedBakedTextureHeight = 0;
+		cachedBakedTextureDepth = 0;
 	}
 
 #if UNITY_6000_0_OR_NEWER
