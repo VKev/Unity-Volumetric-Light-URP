@@ -25,11 +25,23 @@ float Luminance(float3 color)
 
 float EvaluateDistanceAttenuation(float distanceSq, float invRangeSq)
 {
+	// Match URP additional light attenuation shape more closely.
+	// URP applies inverse-square attenuation with a smooth range fade.
 	float safeDistanceSq = max(distanceSq, 0.0001);
-	float distanceFactor = saturate(1.0 - (distanceSq * invRangeSq));
-	distanceFactor *= distanceFactor;
-	distanceFactor *= distanceFactor;
-	return distanceFactor / safeDistanceSq;
+	float factor = distanceSq * invRangeSq;
+	float smoothFactor = saturate(1.0 - (factor * factor));
+	smoothFactor *= smoothFactor;
+	return smoothFactor / safeDistanceSq;
+}
+
+float EvaluateRadiusFade(float distanceSq, float radiusSq)
+{
+	// Mirror shader-side additional light near-origin fade:
+	// newScattering = smoothstep(0, radiusSq, distanceSq);
+	// newScattering *= newScattering;
+	float t = saturate(distanceSq / max(radiusSq, 0.000001));
+	float smooth = t * t * (3.0 - 2.0 * t);
+	return smooth * smooth;
 }
 
 [numthreads(4, 4, 4)]
@@ -85,9 +97,7 @@ void CSInjectStaticVoxelLights(uint3 dispatchThreadId : SV_DispatchThreadID)
 			}
 
 			float radiusSq = max(lightData.lightParams.x, 0.000001);
-			float radialFade = saturate(safeDistanceSq / radiusSq);
-			radialFade = radialFade * radialFade * (3.0 - 2.0 * radialFade);
-			radialFade *= radialFade;
+			float radialFade = EvaluateRadiusFade(safeDistanceSq, radiusSq);
 			attenuation *= radialFade;
 		}
 
