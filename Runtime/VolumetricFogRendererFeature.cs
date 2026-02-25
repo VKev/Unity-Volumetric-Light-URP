@@ -19,6 +19,8 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	[SerializeField] private bool renderInSceneView;
 	[Tooltip("Render volumetric fog in overlay cameras from camera stacks.")]
 	[SerializeField] private bool renderInOverlayCameras;
+	[Tooltip("Render volumetric fog only for the camera tagged MainCamera.")]
+	[SerializeField] private bool renderOnlyMainCameraView;
 
 	private Material downsampleDepthMaterial;
 	private Material volumetricFogMaterial;
@@ -110,13 +112,16 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	{
 		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
 		CameraType cameraType = cameraData.cameraType;
+		Camera camera = cameraData.camera;
 		bool isOverlayCamera = cameraData.renderType == CameraRenderType.Overlay;
 		bool isSceneViewCamera = cameraType == CameraType.SceneView;
+		bool isMainCamera = camera != null && camera.CompareTag("MainCamera");
 
 		bool isVolumeOk = fogVolume != null && fogVolume.IsActive();
 		bool isCameraOk = cameraType != CameraType.Preview && cameraType != CameraType.Reflection;
 		isCameraOk &= renderInSceneView || !isSceneViewCamera;
 		isCameraOk &= renderInOverlayCameras || !isOverlayCamera;
+		isCameraOk &= !renderOnlyMainCameraView || isMainCamera;
 		bool areResourcesOk = ValidateResourcesForVolumetricFogRenderPass(false);
 
 		return isActive && isVolumeOk && isCameraOk && areResourcesOk;
