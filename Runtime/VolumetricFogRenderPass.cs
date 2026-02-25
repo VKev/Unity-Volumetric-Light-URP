@@ -555,13 +555,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			&& bakedLightingData.HasStaticLightsData
 			&& bakedLightingData.BakedLightsCount > 0
 			&& fogVolume.bakedIntensity.value > 0.0f;
-		bool hasValidBakedLightingData = useHybridBakedMode
-			&& bakedLightingData != null
-			&& bakedLightingData.IsValid
-			&& bakedLightingData.BakedLightsCount > 0
-			&& fogVolume.bakedIntensity.value > 0.0f
-			&& !hasValidBakedStaticLightsData;
-		bool classifyLightsByBakeType = hasValidBakedLightingData || hasValidBakedStaticLightsData;
+		// Hybrid mode intentionally avoids camera-dependent pre-integration bake paths.
+		// Only static-light visibility is baked; camera/view-dependent terms are reconstructed at runtime.
+		bool hasValidBakedLightingData = false;
+		bool classifyLightsByBakeType = hasValidBakedStaticLightsData;
 
 		if (!isMaterialStateInitialized || cachedBakedVolumetricLightingEnabled != hasValidBakedLightingData)
 		{

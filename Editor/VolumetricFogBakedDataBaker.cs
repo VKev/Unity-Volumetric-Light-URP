@@ -243,6 +243,11 @@ internal static class VolumetricFogBakedDataBaker
 			directionalSoftConeAngleRadians = Mathf.Deg2Rad * Mathf.Max(0.0f, bakedData.DirectionalSoftShadowConeAngle),
 			punctualSoftConeAngleRadians = Mathf.Deg2Rad * Mathf.Max(0.0f, bakedData.PunctualSoftShadowConeAngle)
 		};
+		if (occlusionSettings.enabled && occlusionSettings.layerMask == 0)
+		{
+			occlusionSettings.layerMask = ~0;
+			Debug.LogWarning("Volumetric fog bake: Occluder Layer Mask was empty. Falling back to Everything to preserve baked shadow occlusion.", fogVolume);
+		}
 
 		using (TemporaryBakeColliderScope temporaryColliderScope = occlusionSettings.enabled && occlusionSettings.createTemporaryMeshColliders
 			? TemporaryBakeColliderScope.Create(occlusionSettings.layerMask, occlusionSettings.staticOccludersOnly)
@@ -845,13 +850,21 @@ internal static class VolumetricFogBakedDataBaker
 		Transform current = gameObject.transform;
 		while (current != null)
 		{
-			if (current.gameObject.isStatic)
+			GameObject currentGameObject = current.gameObject;
+			if (currentGameObject.isStatic)
+				return true;
+
+			// Some projects only set specific static editor flags (for example Contribute GI)
+			// without toggling GameObject.isStatic on all hierarchy nodes.
+			if (GameObjectUtility.GetStaticEditorFlags(currentGameObject) != 0)
 				return true;
 
 			current = current.parent;
 		}
 
-		return false;
+		// Fallback: treat collider/render-only objects without a Rigidbody in their hierarchy
+		// as static scene geometry for bake occlusion purposes.
+		return gameObject.GetComponentInParent<Rigidbody>() == null;
 	}
 
 	private static MethodInfo ResolveUrpAttenuationMethod()

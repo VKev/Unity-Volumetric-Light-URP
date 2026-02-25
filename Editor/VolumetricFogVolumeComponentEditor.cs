@@ -22,7 +22,6 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 	private SerializedDataParameter lightingMode;
 	private SerializedDataParameter bakedData;
 	private SerializedDataParameter bakedIntensity;
-	private SerializedDataParameter bakedUseFroxelSampling;
 #if UNITY_2023_1_OR_NEWER
 	private SerializedDataParameter enableAPVContribution;
 	private SerializedDataParameter APVContributionWeight;
@@ -67,7 +66,6 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		lightingMode = Unpack(pf.Find(x => x.lightingMode));
 		bakedData = Unpack(pf.Find(x => x.bakedData));
 		bakedIntensity = Unpack(pf.Find(x => x.bakedIntensity));
-		bakedUseFroxelSampling = Unpack(pf.Find(x => x.bakedUseFroxelSampling));
 #if UNITY_2023_1_OR_NEWER
 		enableAPVContribution = Unpack(pf.Find(x => x.enableAPVContribution));
 		APVContributionWeight = Unpack(pf.Find(x => x.APVContributionWeight));
@@ -124,9 +122,6 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		{
 			PropertyField(bakedData);
 			PropertyField(bakedIntensity);
-			PropertyField(bakedUseFroxelSampling);
-			if (bakedUseFroxelSampling.value.boolValue)
-				EditorGUILayout.HelpBox("Baked Use Froxel Sampling is faster but less accurate. Disable it for closest match to realtime.", MessageType.Warning);
 		}
 
 		VolumetricFogVolumeComponent fogVolume = target as VolumetricFogVolumeComponent;
