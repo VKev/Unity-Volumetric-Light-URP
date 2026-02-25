@@ -50,14 +50,15 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// <param name="renderingData"></param>
 	public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
 	{
+		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
 		bool shouldPreviewMainCameraRegionInSceneView = ShouldPreviewMainCameraRegionInSceneView(renderingData.cameraData);
 		bool isPostProcessEnabled = renderingData.postProcessingEnabled && renderingData.cameraData.postProcessEnabled;
-		bool shouldAddVolumetricFogRenderPass = isPostProcessEnabled && ShouldAddVolumetricFogRenderPass(renderingData.cameraData, shouldPreviewMainCameraRegionInSceneView);
+		bool shouldAddVolumetricFogRenderPass = isPostProcessEnabled && ShouldAddVolumetricFogRenderPass(renderingData.cameraData, shouldPreviewMainCameraRegionInSceneView, fogVolume);
 		
 		if (shouldAddVolumetricFogRenderPass)
 		{
 			volumetricFogRenderPass.SetupSceneViewMainCameraMask(shouldPreviewMainCameraRegionInSceneView, Camera.main);
-			volumetricFogRenderPass.renderPassEvent = GetRenderPassEvent();
+			volumetricFogRenderPass.renderPassEvent = GetRenderPassEvent(fogVolume);
 			volumetricFogRenderPass.ConfigureInput(ScriptableRenderPassInput.Depth);
 			renderer.EnqueuePass(volumetricFogRenderPass);
 		}
@@ -112,10 +113,10 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// </summary>
 	/// <param name="cameraData"></param>
 	/// <param name="shouldPreviewMainCameraRegionInSceneView"></param>
+	/// <param name="fogVolume"></param>
 	/// <returns></returns>
-	private bool ShouldAddVolumetricFogRenderPass(CameraData cameraData, bool shouldPreviewMainCameraRegionInSceneView)
+	private bool ShouldAddVolumetricFogRenderPass(CameraData cameraData, bool shouldPreviewMainCameraRegionInSceneView, VolumetricFogVolumeComponent fogVolume)
 	{
-		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
 		CameraType cameraType = cameraData.cameraType;
 		Camera camera = cameraData.camera;
 		bool isOverlayCamera = cameraData.renderType == CameraRenderType.Overlay;
@@ -148,11 +149,10 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// <summary>
 	/// Returns the render pass event for the volumetric fog.
 	/// </summary>
+	/// <param name="fogVolume"></param>
 	/// <returns></returns>
-	private RenderPassEvent GetRenderPassEvent()
+	private RenderPassEvent GetRenderPassEvent(VolumetricFogVolumeComponent fogVolume)
 	{
-		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
-		
 		return (RenderPassEvent)fogVolume.renderPassEvent.value;
 	}
 

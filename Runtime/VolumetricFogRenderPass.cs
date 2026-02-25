@@ -46,6 +46,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		public TextureHandle downsampledCameraDepthTarget;
 		public TextureHandle volumetricFogRenderTarget;
 		public UniversalLightData lightData;
+		public VolumetricFogVolumeComponent fogVolume;
+		public Vector3 cameraPosition;
+		public int blurIterations;
 	}
 
 #endif
@@ -89,13 +92,23 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int AnisotropiesArrayId = Shader.PropertyToID("_Anisotropies");
 	private static readonly int ScatteringsArrayId = Shader.PropertyToID("_Scatterings");
 	private static readonly int RadiiSqArrayId = Shader.PropertyToID("_RadiiSq");
+	private static readonly int AdditionalLightIndicesArrayId = Shader.PropertyToID("_AdditionalLightIndices");
 
 	private const int MaxVisibleAdditionalLights = 256;
+	private const float MinAdditionalLightScattering = 0.0001f;
+	private const float MinAdditionalLightIntensity = 0.001f;
 	private static int LightsParametersLength = MaxVisibleAdditionalLights + 1;
 
 	private static readonly float[] Anisotropies = new float[LightsParametersLength];
 	private static readonly float[] Scatterings = new float[LightsParametersLength];
 	private static readonly float[] RadiiSq = new float[MaxVisibleAdditionalLights];
+	private static readonly float[] AdditionalLightIndices = new float[MaxVisibleAdditionalLights];
+
+	private static readonly int[] SelectedAdditionalIndices = new int[MaxVisibleAdditionalLights];
+	private static readonly float[] SelectedAnisotropies = new float[MaxVisibleAdditionalLights];
+	private static readonly float[] SelectedScatterings = new float[MaxVisibleAdditionalLights];
+	private static readonly float[] SelectedRadiiSq = new float[MaxVisibleAdditionalLights];
+	private static readonly float[] SelectedScores = new float[MaxVisibleAdditionalLights];
 
 	private int downsampleDepthPassIndex;
 	private int volumetricFogRenderPassIndex;
@@ -114,6 +127,29 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private ProfilingSampler downsampleDepthProfilingSampler;
 	private readonly Vector4[] mainCameraFrustumPlanes = new Vector4[6];
 	private bool sceneViewMainCameraFrustumMaskEnabled;
+
+	private static bool isMaterialStateInitialized;
+	private static bool cachedMainLightContributionEnabled;
+	private static bool cachedAdditionalLightsContributionEnabled;
+	private static bool cachedSceneViewMainCameraFrustumMaskEnabled;
+#if UNITY_2023_1_OR_NEWER
+	private static bool cachedAPVContributionEnabled;
+#endif
+	private static int cachedAdditionalLightsCount;
+	private static int cachedLightsHash;
+	private static int cachedMainCameraFrustumPlanesHash;
+	private static float cachedDistance;
+	private static float cachedBaseHeight;
+	private static float cachedMaximumHeight;
+	private static float cachedGroundHeight;
+	private static float cachedDensity;
+	private static float cachedAbsortion;
+#if UNITY_2023_1_OR_NEWER
+	private static float cachedAPVContributionWeight;
+#endif
+	private static Color cachedTint;
+	private static int cachedMaxSteps;
+	private static float cachedTransmittanceThreshold;
 
 	#endregion
 
@@ -138,6 +174,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		this.volumetricFogMaterial = volumetricFogMaterial;
 
 		InitializePassesIndices();
+		ResetMaterialStateCache();
 	}
 
 	/// <summary>
@@ -189,10 +226,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		RenderTextureDescriptor cameraTargetDescriptor = renderingData.cameraData.cameraTargetDescriptor;
 		cameraTargetDescriptor.depthBufferBits = (int)DepthBits.None;
+		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
 
 		RenderTextureFormat originalColorFormat = cameraTargetDescriptor.colorFormat;
 		Vector2Int originalResolution = new Vector2Int(cameraTargetDescriptor.width, cameraTargetDescriptor.height);
-		int downsampleFactor = GetDownsampleFactor();
+		int downsampleFactor = GetDownsampleFactor(fogVolume);
 
 		cameraTargetDescriptor.width = Mathf.Max(1, cameraTargetDescriptor.width / downsampleFactor);
 		cameraTargetDescriptor.height = Mathf.Max(1, cameraTargetDescriptor.height / downsampleFactor);
@@ -220,6 +258,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
 	{
 		CommandBuffer cmd = CommandBufferPool.Get();
+		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
+		Vector3 cameraPosition = renderingData.cameraData.camera != null ? renderingData.cameraData.camera.transform.position : Vector3.zero;
 		ApplySceneViewMainCameraMaskParameters(volumetricFogMaterial);
 
 		using (new ProfilingScope(cmd, downsampleDepthProfilingSampler))
@@ -230,10 +270,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		using (new ProfilingScope(cmd, profilingSampler))
 		{
-			UpdateVolumetricFogMaterialParameters(volumetricFogMaterial, renderingData.lightData.mainLightIndex, renderingData.lightData.additionalLightsCount, renderingData.lightData.visibleLights);
+			UpdateVolumetricFogMaterialParameters(volumetricFogMaterial, fogVolume, cameraPosition, renderingData.lightData.mainLightIndex, renderingData.lightData.additionalLightsCount, renderingData.lightData.visibleLights);
 			Blitter.BlitCameraTexture(cmd, volumetricFogRenderRTHandle, volumetricFogRenderRTHandle, volumetricFogMaterial, volumetricFogRenderPassIndex);
 
-			VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
 			int blurIterations = fogVolume != null ? fogVolume.blurIterations.value : 0;
 
 			for (int i = 0; i < blurIterations; ++i)
@@ -268,9 +307,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
 		UniversalLightData lightData = frameData.Get<UniversalLightData>();
 		UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
+		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
+		Vector3 cameraPosition = cameraData.camera != null ? cameraData.camera.transform.position : Vector3.zero;
 		ApplySceneViewMainCameraMaskParameters(volumetricFogMaterial);
 
-		CreateRenderGraphTextures(renderGraph, cameraData, out TextureHandle downsampledCameraDepthTarget, out TextureHandle volumetricFogRenderTarget, out TextureHandle volumetricFogBlurRenderTarget, out TextureHandle volumetricFogUpsampleCompositionTarget);
+		CreateRenderGraphTextures(renderGraph, cameraData, fogVolume, out TextureHandle downsampledCameraDepthTarget, out TextureHandle volumetricFogRenderTarget, out TextureHandle volumetricFogBlurRenderTarget, out TextureHandle volumetricFogUpsampleCompositionTarget);
 
 		using (IRasterRenderGraphBuilder builder = renderGraph.AddRasterRenderPass("Downsample Depth Pass", out PassData passData, downsampleDepthProfilingSampler))
 		{
@@ -294,6 +335,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			passData.materialPassIndex = volumetricFogRenderPassIndex;
 			passData.downsampledCameraDepthTarget = downsampledCameraDepthTarget;
 			passData.lightData = lightData;
+			passData.fogVolume = fogVolume;
+			passData.cameraPosition = cameraPosition;
 
 			builder.SetRenderAttachment(volumetricFogRenderTarget, 0, AccessFlags.WriteAll);
 			builder.UseTexture(downsampledCameraDepthTarget);
@@ -312,6 +355,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			passData.material = volumetricFogMaterial;
 			passData.materialPassIndex = volumetricFogHorizontalBlurPassIndex;
 			passData.materialAdditionalPassIndex = volumetricFogVerticalBlurPassIndex;
+			passData.blurIterations = fogVolume != null ? fogVolume.blurIterations.value : 0;
 
 			builder.UseTexture(volumetricFogRenderTarget, AccessFlags.ReadWrite);
 			builder.UseTexture(volumetricFogBlurRenderTarget, AccessFlags.ReadWrite);
@@ -350,114 +394,164 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="material"></param>
 	private void ApplySceneViewMainCameraMaskParameters(Material material)
 	{
-		material.SetInteger(SceneViewMainCameraFrustumMaskEnabledId, sceneViewMainCameraFrustumMaskEnabled ? 1 : 0);
-		if (sceneViewMainCameraFrustumMaskEnabled)
-			material.SetVectorArray(MainCameraFrustumPlanesId, mainCameraFrustumPlanes);
+		bool maskEnabled = sceneViewMainCameraFrustumMaskEnabled;
+		if (!isMaterialStateInitialized || cachedSceneViewMainCameraFrustumMaskEnabled != maskEnabled)
+		{
+			material.SetInteger(SceneViewMainCameraFrustumMaskEnabledId, maskEnabled ? 1 : 0);
+			cachedSceneViewMainCameraFrustumMaskEnabled = maskEnabled;
+		}
+
+		if (maskEnabled)
+		{
+			int planesHash = ComputeVector4ArrayHash(mainCameraFrustumPlanes, mainCameraFrustumPlanes.Length);
+			if (!isMaterialStateInitialized || planesHash != cachedMainCameraFrustumPlanesHash)
+			{
+				material.SetVectorArray(MainCameraFrustumPlanesId, mainCameraFrustumPlanes);
+				cachedMainCameraFrustumPlanesHash = planesHash;
+			}
+		}
 	}
 
 	/// <summary>
 	/// Updates the volumetric fog material parameters.
 	/// </summary>
 	/// <param name="volumetricFogMaterial"></param>
+	/// <param name="fogVolume"></param>
+	/// <param name="cameraPosition"></param>
 	/// <param name="mainLightIndex"></param>
 	/// <param name="additionalLightsCount"></param>
 	/// <param name="visibleLights"></param>
-	private static void UpdateVolumetricFogMaterialParameters(Material volumetricFogMaterial, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights)
+	private static void UpdateVolumetricFogMaterialParameters(Material volumetricFogMaterial, VolumetricFogVolumeComponent fogVolume, Vector3 cameraPosition, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights)
 	{
-		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
+		if (fogVolume == null)
+			return;
 
 		bool enableMainLightContribution = fogVolume.enableMainLightContribution.value && fogVolume.scattering.value > 0.0f && mainLightIndex > -1;
 		bool enableAdditionalLightsContribution = fogVolume.enableAdditionalLightsContribution.value && additionalLightsCount > 0 && fogVolume.maxAdditionalLights.value > 0;
 
+		int lightsHash = 0;
 		int effectiveAdditionalLightsCount = 0;
 		if (enableMainLightContribution || enableAdditionalLightsContribution)
-			effectiveAdditionalLightsCount = UpdateLightsParameters(volumetricFogMaterial, fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, mainLightIndex, additionalLightsCount, visibleLights);
+			effectiveAdditionalLightsCount = UpdateLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
 
 		enableAdditionalLightsContribution &= effectiveAdditionalLightsCount > 0;
 
 #if UNITY_2023_1_OR_NEWER
 		bool enableAPVContribution = fogVolume.enableAPVContribution.value && fogVolume.APVContributionWeight.value > 0.0f;
-		if (enableAPVContribution)
-			volumetricFogMaterial.EnableKeyword("_APV_CONTRIBUTION_ENABLED");
-		else
-			volumetricFogMaterial.DisableKeyword("_APV_CONTRIBUTION_ENABLED");
+		if (!isMaterialStateInitialized || cachedAPVContributionEnabled != enableAPVContribution)
+		{
+			if (enableAPVContribution)
+				volumetricFogMaterial.EnableKeyword("_APV_CONTRIBUTION_ENABLED");
+			else
+				volumetricFogMaterial.DisableKeyword("_APV_CONTRIBUTION_ENABLED");
+
+			cachedAPVContributionEnabled = enableAPVContribution;
+		}
 #endif
 
-		if (enableMainLightContribution)
-			volumetricFogMaterial.DisableKeyword("_MAIN_LIGHT_CONTRIBUTION_DISABLED");
-		else
-			volumetricFogMaterial.EnableKeyword("_MAIN_LIGHT_CONTRIBUTION_DISABLED");
+		if (!isMaterialStateInitialized || cachedMainLightContributionEnabled != enableMainLightContribution)
+		{
+			if (enableMainLightContribution)
+				volumetricFogMaterial.DisableKeyword("_MAIN_LIGHT_CONTRIBUTION_DISABLED");
+			else
+				volumetricFogMaterial.EnableKeyword("_MAIN_LIGHT_CONTRIBUTION_DISABLED");
 
-		if (enableAdditionalLightsContribution)
-			volumetricFogMaterial.DisableKeyword("_ADDITIONAL_LIGHTS_CONTRIBUTION_DISABLED");
-		else
-			volumetricFogMaterial.EnableKeyword("_ADDITIONAL_LIGHTS_CONTRIBUTION_DISABLED");
+			cachedMainLightContributionEnabled = enableMainLightContribution;
+		}
+
+		if (!isMaterialStateInitialized || cachedAdditionalLightsContributionEnabled != enableAdditionalLightsContribution)
+		{
+			if (enableAdditionalLightsContribution)
+				volumetricFogMaterial.DisableKeyword("_ADDITIONAL_LIGHTS_CONTRIBUTION_DISABLED");
+			else
+				volumetricFogMaterial.EnableKeyword("_ADDITIONAL_LIGHTS_CONTRIBUTION_DISABLED");
+
+			cachedAdditionalLightsContributionEnabled = enableAdditionalLightsContribution;
+		}
 
 		volumetricFogMaterial.SetInteger(FrameCountId, Time.renderedFrameCount % 64);
-		volumetricFogMaterial.SetInteger(CustomAdditionalLightsCountId, effectiveAdditionalLightsCount);
-		volumetricFogMaterial.SetFloat(DistanceId, fogVolume.distance.value);
-		volumetricFogMaterial.SetFloat(BaseHeightId, fogVolume.baseHeight.value);
-		volumetricFogMaterial.SetFloat(MaximumHeightId, fogVolume.maximumHeight.value);
-		volumetricFogMaterial.SetFloat(GroundHeightId, (fogVolume.enableGround.overrideState && fogVolume.enableGround.value) ? fogVolume.groundHeight.value : float.MinValue);
-		volumetricFogMaterial.SetFloat(DensityId, fogVolume.density.value);
-		volumetricFogMaterial.SetFloat(AbsortionId, 1.0f / fogVolume.attenuationDistance.value);
+		SetIntIfChanged(volumetricFogMaterial, CustomAdditionalLightsCountId, effectiveAdditionalLightsCount, ref cachedAdditionalLightsCount);
+		SetFloatIfChanged(volumetricFogMaterial, DistanceId, fogVolume.distance.value, ref cachedDistance);
+		SetFloatIfChanged(volumetricFogMaterial, BaseHeightId, fogVolume.baseHeight.value, ref cachedBaseHeight);
+		SetFloatIfChanged(volumetricFogMaterial, MaximumHeightId, fogVolume.maximumHeight.value, ref cachedMaximumHeight);
+
+		float groundHeight = (fogVolume.enableGround.overrideState && fogVolume.enableGround.value) ? fogVolume.groundHeight.value : float.MinValue;
+		SetFloatIfChanged(volumetricFogMaterial, GroundHeightId, groundHeight, ref cachedGroundHeight);
+		SetFloatIfChanged(volumetricFogMaterial, DensityId, fogVolume.density.value, ref cachedDensity);
+		SetFloatIfChanged(volumetricFogMaterial, AbsortionId, 1.0f / fogVolume.attenuationDistance.value, ref cachedAbsortion);
 #if UNITY_2023_1_OR_NEWER
-		volumetricFogMaterial.SetFloat(APVContributionWeigthId, fogVolume.enableAPVContribution.value ? fogVolume.APVContributionWeight.value : 0.0f);
+		float apvContributionWeight = fogVolume.enableAPVContribution.value ? fogVolume.APVContributionWeight.value : 0.0f;
+		SetFloatIfChanged(volumetricFogMaterial, APVContributionWeigthId, apvContributionWeight, ref cachedAPVContributionWeight);
 #endif
-		volumetricFogMaterial.SetColor(TintId, fogVolume.tint.value);
-		volumetricFogMaterial.SetInteger(MaxStepsId, fogVolume.maxSteps.value);
-		volumetricFogMaterial.SetFloat(TransmittanceThresholdId, fogVolume.transmittanceThreshold.value);
+		SetColorIfChanged(volumetricFogMaterial, TintId, fogVolume.tint.value, ref cachedTint);
+		SetIntIfChanged(volumetricFogMaterial, MaxStepsId, fogVolume.maxSteps.value, ref cachedMaxSteps);
+		SetFloatIfChanged(volumetricFogMaterial, TransmittanceThresholdId, fogVolume.transmittanceThreshold.value, ref cachedTransmittanceThreshold);
+
+		if (enableMainLightContribution || effectiveAdditionalLightsCount > 0)
+		{
+			if (!isMaterialStateInitialized || lightsHash != cachedLightsHash)
+			{
+				volumetricFogMaterial.SetFloatArray(AnisotropiesArrayId, Anisotropies);
+				volumetricFogMaterial.SetFloatArray(ScatteringsArrayId, Scatterings);
+				volumetricFogMaterial.SetFloatArray(RadiiSqArrayId, RadiiSq);
+				volumetricFogMaterial.SetFloatArray(AdditionalLightIndicesArrayId, AdditionalLightIndices);
+				cachedLightsHash = lightsHash;
+			}
+		}
+
+		isMaterialStateInitialized = true;
 	}
 
 	/// <summary>
-	/// Updates the lights parameters from the material.
+	/// Updates and selects additional lights that will contribute to fog.
 	/// </summary>
-	/// <param name="volumetricFogMaterial"></param>
 	/// <param name="fogVolume"></param>
 	/// <param name="enableMainLightContribution"></param>
 	/// <param name="enableAdditionalLightsContribution"></param>
 	/// <param name="mainLightIndex"></param>
 	/// <param name="additionalLightsCount"></param>
 	/// <param name="visibleLights"></param>
+	/// <param name="cameraPosition"></param>
+	/// <param name="lightsHash"></param>
 	/// <returns></returns>
-	private static int UpdateLightsParameters(Material volumetricFogMaterial, VolumetricFogVolumeComponent fogVolume, bool enableMainLightContribution, bool enableAdditionalLightsContribution, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights)
+	private static int UpdateLightsParameters(VolumetricFogVolumeComponent fogVolume, bool enableMainLightContribution, bool enableAdditionalLightsContribution, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights, Vector3 cameraPosition, out int lightsHash)
 	{
 		// TODO: Forward+ and deferred+ visibleLights.Length is 256. In forward, it is 257 so the main light is considered apart. In deferred it seems to not have any limit (seen 1.6k and beyond).
 		// All rendering paths have maxVisibleAdditionalLights at 256.
-		// For the time being, just assume that if additional lights contribution to fog is enabled, we are either using clustered rendering, or using forward or deferred with, at most, 257 visible lights.
-		int lastIndex = Mathf.Min(visibleLights.Length - 1, LightsParametersLength - 1);
+		// For the time being, compact the best candidates and send a trimmed list to shader.
 		int effectiveAdditionalLightsCount = 0;
 
-		if (enableAdditionalLightsContribution && lastIndex >= 0)
+		if (enableAdditionalLightsContribution && visibleLights.Length > 0)
 		{
 			int maxAdditionalLights = Mathf.Clamp(fogVolume.maxAdditionalLights.value, 0, MaxVisibleAdditionalLights);
-			int maxAdditionalLightsToProcess = Mathf.Min(additionalLightsCount, maxAdditionalLights);
+			int lastIndex = Mathf.Min(visibleLights.Length - 1, LightsParametersLength - 1);
+			float fogDistance = fogVolume.distance.value;
+			bool groundEnabled = fogVolume.enableGround.overrideState && fogVolume.enableGround.value;
+			float fogMinHeight = groundEnabled ? fogVolume.groundHeight.value : float.NegativeInfinity;
+			float fogMaxHeight = fogVolume.maximumHeight.value;
+			int additionalLightSlotIndex = 0;
 
-			for (int i = 0; i <= lastIndex && effectiveAdditionalLightsCount < maxAdditionalLightsToProcess; ++i)
+			for (int i = 0; i <= lastIndex && additionalLightSlotIndex < additionalLightsCount; ++i)
 			{
 				if (i == mainLightIndex)
 					continue;
 
-				float anisotropy = 0.0f;
-				float scattering = 0.0f;
-				float radius = 0.0f;
+				int additionalLightIndex = additionalLightSlotIndex++;
+				VisibleLight visibleLight = visibleLights[i];
 
-				Light light = visibleLights[i].light;
-				if (light != null && light.TryGetComponent(out VolumetricAdditionalLight volumetricLight))
-				{
-					if (volumetricLight.gameObject.activeInHierarchy && volumetricLight.enabled)
-					{
-						anisotropy = volumetricLight.Anisotropy;
-						scattering = volumetricLight.Scattering;
-						radius = volumetricLight.Radius;
-					}
-				}
+				if (!TryGetAdditionalLightCandidate(visibleLight, cameraPosition, fogDistance, fogMinHeight, fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score))
+					continue;
 
-				Anisotropies[effectiveAdditionalLightsCount] = anisotropy;
-				Scatterings[effectiveAdditionalLightsCount] = scattering;
-				RadiiSq[effectiveAdditionalLightsCount] = radius * radius;
-				effectiveAdditionalLightsCount++;
+				TryInsertSelectedAdditionalLight(additionalLightIndex, anisotropy, scattering, radiusSq, score, maxAdditionalLights, ref effectiveAdditionalLightsCount);
 			}
+		}
+
+		for (int i = 0; i < effectiveAdditionalLightsCount; ++i)
+		{
+			AdditionalLightIndices[i] = SelectedAdditionalIndices[i];
+			Anisotropies[i] = SelectedAnisotropies[i];
+			Scatterings[i] = SelectedScatterings[i];
+			RadiiSq[i] = SelectedRadiiSq[i];
 		}
 
 		if (enableMainLightContribution)
@@ -466,14 +560,247 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			Scatterings[effectiveAdditionalLightsCount] = fogVolume.scattering.value;
 		}
 
-		if (enableMainLightContribution || effectiveAdditionalLightsCount > 0)
+		lightsHash = ComputeLightsHash(effectiveAdditionalLightsCount, enableMainLightContribution);
+		return effectiveAdditionalLightsCount;
+	}
+
+	/// <summary>
+	/// Returns whether a visible light is a valid additional light candidate for fog.
+	/// </summary>
+	/// <param name="visibleLight"></param>
+	/// <param name="cameraPosition"></param>
+	/// <param name="fogDistance"></param>
+	/// <param name="fogMinHeight"></param>
+	/// <param name="fogMaxHeight"></param>
+	/// <param name="anisotropy"></param>
+	/// <param name="scattering"></param>
+	/// <param name="radiusSq"></param>
+	/// <param name="score"></param>
+	/// <returns></returns>
+	private static bool TryGetAdditionalLightCandidate(in VisibleLight visibleLight, in Vector3 cameraPosition, float fogDistance, float fogMinHeight, float fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score)
+	{
+		anisotropy = 0.0f;
+		scattering = 0.0f;
+		radiusSq = 0.0f;
+		score = 0.0f;
+
+		Light light = visibleLight.light;
+		if (light == null || !light.enabled || !light.gameObject.activeInHierarchy)
+			return false;
+
+		// Volumetric additional lights are only expected to be point and spot lights.
+		if (light.type != LightType.Point && light.type != LightType.Spot)
+			return false;
+
+		if (!light.TryGetComponent(out VolumetricAdditionalLight volumetricLight) || !volumetricLight.enabled || !volumetricLight.gameObject.activeInHierarchy)
+			return false;
+
+		scattering = volumetricLight.Scattering;
+		if (scattering <= MinAdditionalLightScattering || light.intensity <= MinAdditionalLightIntensity)
+			return false;
+
+		float range = Mathf.Max(light.range, 0.01f);
+		Vector3 lightPosition = light.transform.position;
+		float maxDistance = fogDistance + range;
+		float distanceSq = (lightPosition - cameraPosition).sqrMagnitude;
+		if (distanceSq > maxDistance * maxDistance)
+			return false;
+
+		float lightMinY = lightPosition.y - range;
+		float lightMaxY = lightPosition.y + range;
+		if (lightMaxY < fogMinHeight || lightMinY > fogMaxHeight)
+			return false;
+
+		anisotropy = volumetricLight.Anisotropy;
+		radiusSq = volumetricLight.Radius * volumetricLight.Radius;
+
+		float distanceWeight = (range * range) / Mathf.Max(distanceSq, 1.0f);
+		score = scattering * light.intensity * distanceWeight;
+		if (light.type == LightType.Spot)
 		{
-			volumetricFogMaterial.SetFloatArray(AnisotropiesArrayId, Anisotropies);
-			volumetricFogMaterial.SetFloatArray(ScatteringsArrayId, Scatterings);
-			volumetricFogMaterial.SetFloatArray(RadiiSqArrayId, RadiiSq);
+			float spotAngleCos = Mathf.Cos(0.5f * Mathf.Deg2Rad * light.spotAngle);
+			score *= Mathf.Max(0.25f, spotAngleCos);
 		}
 
-		return effectiveAdditionalLightsCount;
+		return score > 0.0f;
+	}
+
+	/// <summary>
+	/// Inserts a candidate additional light into the compact selected list.
+	/// </summary>
+	/// <param name="additionalLightIndex"></param>
+	/// <param name="anisotropy"></param>
+	/// <param name="scattering"></param>
+	/// <param name="radiusSq"></param>
+	/// <param name="score"></param>
+	/// <param name="maxAdditionalLights"></param>
+	/// <param name="selectedCount"></param>
+	private static void TryInsertSelectedAdditionalLight(int additionalLightIndex, float anisotropy, float scattering, float radiusSq, float score, int maxAdditionalLights, ref int selectedCount)
+	{
+		if (maxAdditionalLights <= 0)
+			return;
+
+		int selectedIndex = -1;
+		if (selectedCount < maxAdditionalLights)
+		{
+			selectedIndex = selectedCount++;
+		}
+		else
+		{
+			float minScore = SelectedScores[0];
+			int minScoreIndex = 0;
+			for (int i = 1; i < selectedCount; ++i)
+			{
+				if (SelectedScores[i] < minScore)
+				{
+					minScore = SelectedScores[i];
+					minScoreIndex = i;
+				}
+			}
+
+			if (score <= minScore)
+				return;
+
+			selectedIndex = minScoreIndex;
+		}
+
+		SelectedAdditionalIndices[selectedIndex] = additionalLightIndex;
+		SelectedAnisotropies[selectedIndex] = anisotropy;
+		SelectedScatterings[selectedIndex] = scattering;
+		SelectedRadiiSq[selectedIndex] = radiusSq;
+		SelectedScores[selectedIndex] = score;
+	}
+
+	/// <summary>
+	/// Computes a hash from selected light parameters to avoid redundant material array uploads.
+	/// </summary>
+	/// <param name="additionalLightsCount"></param>
+	/// <param name="includeMainLight"></param>
+	/// <returns></returns>
+	private static int ComputeLightsHash(int additionalLightsCount, bool includeMainLight)
+	{
+		unchecked
+		{
+			int hash = 17;
+			hash = (hash * 31) + additionalLightsCount;
+
+			for (int i = 0; i < additionalLightsCount; ++i)
+			{
+				hash = (hash * 31) + AdditionalLightIndices[i].GetHashCode();
+				hash = (hash * 31) + Anisotropies[i].GetHashCode();
+				hash = (hash * 31) + Scatterings[i].GetHashCode();
+				hash = (hash * 31) + RadiiSq[i].GetHashCode();
+			}
+
+			if (includeMainLight)
+			{
+				hash = (hash * 31) + Anisotropies[additionalLightsCount].GetHashCode();
+				hash = (hash * 31) + Scatterings[additionalLightsCount].GetHashCode();
+			}
+
+			return hash;
+		}
+	}
+
+	/// <summary>
+	/// Computes a hash for a vector array.
+	/// </summary>
+	/// <param name="array"></param>
+	/// <param name="count"></param>
+	/// <returns></returns>
+	private static int ComputeVector4ArrayHash(Vector4[] array, int count)
+	{
+		unchecked
+		{
+			int hash = 17;
+			for (int i = 0; i < count; ++i)
+				hash = (hash * 31) + array[i].GetHashCode();
+
+			return hash;
+		}
+	}
+
+	/// <summary>
+	/// Sets an integer material property only when it changes.
+	/// </summary>
+	/// <param name="material"></param>
+	/// <param name="propertyId"></param>
+	/// <param name="value"></param>
+	/// <param name="cachedValue"></param>
+	private static void SetIntIfChanged(Material material, int propertyId, int value, ref int cachedValue)
+	{
+		if (!isMaterialStateInitialized || cachedValue != value)
+		{
+			material.SetInteger(propertyId, value);
+			cachedValue = value;
+		}
+	}
+
+	/// <summary>
+	/// Sets a float material property only when it changes.
+	/// </summary>
+	/// <param name="material"></param>
+	/// <param name="propertyId"></param>
+	/// <param name="value"></param>
+	/// <param name="cachedValue"></param>
+	private static void SetFloatIfChanged(Material material, int propertyId, float value, ref float cachedValue)
+	{
+		if (!isMaterialStateInitialized || Mathf.Abs(cachedValue - value) > 0.0001f)
+		{
+			material.SetFloat(propertyId, value);
+			cachedValue = value;
+		}
+	}
+
+	/// <summary>
+	/// Sets a color material property only when it changes.
+	/// </summary>
+	/// <param name="material"></param>
+	/// <param name="propertyId"></param>
+	/// <param name="value"></param>
+	/// <param name="cachedValue"></param>
+	private static void SetColorIfChanged(Material material, int propertyId, Color value, ref Color cachedValue)
+	{
+		bool changed = !isMaterialStateInitialized;
+		changed |= Mathf.Abs(cachedValue.r - value.r) > 0.0001f;
+		changed |= Mathf.Abs(cachedValue.g - value.g) > 0.0001f;
+		changed |= Mathf.Abs(cachedValue.b - value.b) > 0.0001f;
+		changed |= Mathf.Abs(cachedValue.a - value.a) > 0.0001f;
+
+		if (changed)
+		{
+			material.SetColor(propertyId, value);
+			cachedValue = value;
+		}
+	}
+
+	/// <summary>
+	/// Resets all cached material state for dirty-checking.
+	/// </summary>
+	private static void ResetMaterialStateCache()
+	{
+		isMaterialStateInitialized = false;
+		cachedMainLightContributionEnabled = false;
+		cachedAdditionalLightsContributionEnabled = false;
+		cachedSceneViewMainCameraFrustumMaskEnabled = false;
+#if UNITY_2023_1_OR_NEWER
+		cachedAPVContributionEnabled = false;
+#endif
+		cachedAdditionalLightsCount = int.MinValue;
+		cachedLightsHash = int.MinValue;
+		cachedMainCameraFrustumPlanesHash = int.MinValue;
+		cachedDistance = float.NaN;
+		cachedBaseHeight = float.NaN;
+		cachedMaximumHeight = float.NaN;
+		cachedGroundHeight = float.NaN;
+		cachedDensity = float.NaN;
+		cachedAbsortion = float.NaN;
+#if UNITY_2023_1_OR_NEWER
+		cachedAPVContributionWeight = float.NaN;
+#endif
+		cachedTint = new Color(float.NaN, float.NaN, float.NaN, float.NaN);
+		cachedMaxSteps = int.MinValue;
+		cachedTransmittanceThreshold = float.NaN;
 	}
 
 #if UNITY_6000_0_OR_NEWER
@@ -487,14 +814,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="volumetricFogRenderTarget"></param>
 	/// <param name="volumetricFogBlurRenderTarget"></param>
 	/// <param name="volumetricFogUpsampleCompositionTarget"></param>
-	private void CreateRenderGraphTextures(RenderGraph renderGraph, UniversalCameraData cameraData, out TextureHandle downsampledCameraDepthTarget, out TextureHandle volumetricFogRenderTarget, out TextureHandle volumetricFogBlurRenderTarget, out TextureHandle volumetricFogUpsampleCompositionTarget)
+	private void CreateRenderGraphTextures(RenderGraph renderGraph, UniversalCameraData cameraData, VolumetricFogVolumeComponent fogVolume, out TextureHandle downsampledCameraDepthTarget, out TextureHandle volumetricFogRenderTarget, out TextureHandle volumetricFogBlurRenderTarget, out TextureHandle volumetricFogUpsampleCompositionTarget)
 	{
 		RenderTextureDescriptor cameraTargetDescriptor = cameraData.cameraTargetDescriptor;
 		cameraTargetDescriptor.depthBufferBits = (int)DepthBits.None;
 
 		RenderTextureFormat originalColorFormat = cameraTargetDescriptor.colorFormat;
 		Vector2Int originalResolution = new Vector2Int(cameraTargetDescriptor.width, cameraTargetDescriptor.height);
-		int downsampleFactor = GetDownsampleFactor();
+		int downsampleFactor = GetDownsampleFactor(fogVolume);
 
 		cameraTargetDescriptor.width = Mathf.Max(1, cameraTargetDescriptor.width / downsampleFactor);
 		cameraTargetDescriptor.height = Mathf.Max(1, cameraTargetDescriptor.height / downsampleFactor);
@@ -523,7 +850,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (stage == PassStage.VolumetricFogRender)
 		{
 			passData.material.SetTexture(DownsampledCameraDepthTextureId, passData.downsampledCameraDepthTarget);
-			UpdateVolumetricFogMaterialParameters(passData.material, passData.lightData.mainLightIndex, passData.lightData.additionalLightsCount, passData.lightData.visibleLights);
+			UpdateVolumetricFogMaterialParameters(passData.material, passData.fogVolume, passData.cameraPosition, passData.lightData.mainLightIndex, passData.lightData.additionalLightsCount, passData.lightData.visibleLights);
 		}
 		else if (stage == PassStage.VolumetricFogUpsampleComposition)
 		{
@@ -542,8 +869,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	{
 		CommandBuffer unsafeCmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
 
-		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
-		int blurIterations = fogVolume != null ? fogVolume.blurIterations.value : 0;
+		int blurIterations = passData.blurIterations;
 
 		for (int i = 0; i < blurIterations; ++i)
 		{
@@ -558,9 +884,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// Returns the selected downsample factor from the active volume.
 	/// </summary>
 	/// <returns></returns>
-	private static int GetDownsampleFactor()
+	private static int GetDownsampleFactor(VolumetricFogVolumeComponent fogVolume)
 	{
-		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
 		if (fogVolume == null)
 			return (int)VolumetricFogDownsampleMode.Half;
 
@@ -593,6 +918,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		volumetricFogRenderRTHandle?.Release();
 		volumetricFogBlurRTHandle?.Release();
 		volumetricFogUpsampleCompositionRTHandle?.Release();
+		ResetMaterialStateCache();
 	}
 
 	#endregion

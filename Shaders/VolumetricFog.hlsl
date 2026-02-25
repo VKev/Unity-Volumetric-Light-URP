@@ -33,6 +33,7 @@ int _MaxSteps;
 float _Anisotropies[MAX_VISIBLE_LIGHTS + 1];
 float _Scatterings[MAX_VISIBLE_LIGHTS + 1];
 float _RadiiSq[MAX_VISIBLE_LIGHTS];
+float _AdditionalLightIndices[MAX_VISIBLE_LIGHTS];
 
 // Computes the ray origin, direction, and returns the reconstructed world position for orthographic projection.
 float3 ComputeOrthographicParams(float2 uv, float depth, out float3 ro, out float3 rd)
@@ -111,16 +112,16 @@ float GetFogDensity(float posWSy)
 // Gets the GI evaluation from the adaptive probe volume at one raymarch step.
 float3 GetStepAdaptiveProbeVolumeEvaluation(float2 uv, float3 posWS, float density)
 {
-    float3 apvDiffuseGI = float3(0.0, 0.0, 0.0);
+    half3 apvDiffuseGI = half3(0.0, 0.0, 0.0);
     
 #if UNITY_VERSION >= 202310 && _APV_CONTRIBUTION_ENABLED
     #if defined(PROBE_VOLUMES_L1) || defined(PROBE_VOLUMES_L2)
         EvaluateAdaptiveProbeVolume(posWS, uv * _ScreenSize.xy, apvDiffuseGI);
-        apvDiffuseGI = apvDiffuseGI * _APVContributionWeight * density;
+        apvDiffuseGI = apvDiffuseGI * (half)_APVContributionWeight * (half)density;
     #endif
 #endif
  
-    return apvDiffuseGI;
+    return (float3)apvDiffuseGI;
 }
 
 // Gets the main light color at one raymarch step.
@@ -135,57 +136,57 @@ float3 GetStepMainLightColor(float3 currPosWS, float phaseMainLight, float densi
 #if _LIGHT_COOKIES
     mainLight.color *= SampleMainLightCookie(currPosWS);
 #endif
-    return (mainLight.color * _Tint) * (mainLight.shadowAttenuation * phaseMainLight * density * _Scatterings[_CustomAdditionalLightsCount]);
+    half3 tint = (half3)_Tint;
+    half scattering = (half)_Scatterings[_CustomAdditionalLightsCount];
+    return (float3)((half3)mainLight.color * tint * (mainLight.shadowAttenuation * (half)phaseMainLight * (half)density * scattering));
 }
 
 // Gets the accumulated color from additional lights at one raymarch step.
-float3 GetStepAdditionalLightsColor(float2 uv, float3 currPosWS, float3 rd, float density)
+float3 GetStepAdditionalLightsColor(float3 currPosWS, float3 rd, float density)
 {
 #if _ADDITIONAL_LIGHTS_CONTRIBUTION_DISABLED
     return float3(0.0, 0.0, 0.0);
 #endif
-#if _FORWARD_PLUS
-    // Forward+ rendering path needs this data before the light loop.
-    InputData inputData = (InputData)0;
-    inputData.normalizedScreenSpaceUV = uv;
-    inputData.positionWS = currPosWS;
-#endif
-    float3 additionalLightsColor = float3(0.0, 0.0, 0.0);
-                
-    // Loop differently through lights in Forward+ while considering Forward and Deferred too.
-    LIGHT_LOOP_BEGIN(_CustomAdditionalLightsCount)
+    half3 additionalLightsColor = half3(0.0, 0.0, 0.0);
+
+    UNITY_LOOP
+    for (uint compactLightIndex = 0; compactLightIndex < _CustomAdditionalLightsCount; ++compactLightIndex)
+    {
+        float scattering = _Scatterings[compactLightIndex];
         UNITY_BRANCH
-        if (_Scatterings[lightIndex] > 0.0)
+        if (scattering > 0.0)
         {
-            Light additionalLight = GetAdditionalPerObjectLight(lightIndex, currPosWS);
-            additionalLight.shadowAttenuation = VolumetricAdditionalLightRealtimeShadow(lightIndex, currPosWS, additionalLight.direction);
+            int additionalLightIndex = (int)_AdditionalLightIndices[compactLightIndex];
+
+            Light additionalLight = GetAdditionalPerObjectLight(additionalLightIndex, currPosWS);
+            additionalLight.shadowAttenuation = VolumetricAdditionalLightRealtimeShadow(additionalLightIndex, currPosWS, additionalLight.direction);
 #if _LIGHT_COOKIES
-            additionalLight.color *= SampleAdditionalLightCookie(lightIndex, currPosWS);
+            additionalLight.color *= SampleAdditionalLightCookie(additionalLightIndex, currPosWS);
 #endif
             // See universal\ShaderLibrary\RealtimeLights.hlsl - GetAdditionalPerObjectLight.
 #if USE_STRUCTURED_BUFFER_FOR_LIGHT_DATA
-            float4 additionalLightPos = _AdditionalLightsBuffer[lightIndex].position;
+            float4 additionalLightPos = _AdditionalLightsBuffer[additionalLightIndex].position;
 #else
-            float4 additionalLightPos = _AdditionalLightsPosition[lightIndex];
+            float4 additionalLightPos = _AdditionalLightsPosition[additionalLightIndex];
 #endif
             // This is useful for both spotlights and pointlights. For the latter it is specially true when the point light is inside some geometry and casts shadows.
             // Gradually reduce additional lights scattering to zero at their origin to try to avoid flicker-aliasing.
             float3 distToPos = additionalLightPos.xyz - currPosWS;
             float distToPosMagnitudeSq = dot(distToPos, distToPos);
-            float newScattering = smoothstep(0.0, _RadiiSq[lightIndex], distToPosMagnitudeSq) ;
+            float newScattering = smoothstep(0.0, _RadiiSq[compactLightIndex], distToPosMagnitudeSq) ;
             newScattering *= newScattering;
-            newScattering *= _Scatterings[lightIndex];
+            newScattering *= scattering;
 
             // If directional lights are also considered as additional lights when more than 1 is used, ignore the previous code when it is a directional light.
             // They store direction in additionalLightPos.xyz and have .w set to 0, while point and spotlights have it set to 1.
             // newScattering = lerp(1.0, newScattering, additionalLightPos.w);
     
-            float phase = CornetteShanksPhaseFunction(_Anisotropies[lightIndex], dot(rd, additionalLight.direction));
-            additionalLightsColor += (additionalLight.color * (additionalLight.shadowAttenuation * additionalLight.distanceAttenuation * phase * density * newScattering));
+            half phase = CornetteShanksPhaseFunction(_Anisotropies[compactLightIndex], dot(rd, additionalLight.direction));
+            additionalLightsColor += (half3)additionalLight.color * (additionalLight.shadowAttenuation * additionalLight.distanceAttenuation * phase * density * newScattering);
         }
-    LIGHT_LOOP_END
+    }
 
-    return additionalLightsColor;
+    return (float3)additionalLightsColor;
 }
 
 // Calculates the volumetric fog. Returns the color in the RGB channels and transmittance in alpha.
@@ -209,11 +210,11 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
     float stepLength = maxRaymarchDistance / (float)_MaxSteps;
     float jitter = stepLength * InterleavedGradientNoise(positionCS, _FrameCount);
 
-    float phaseMainLight = GetMainLightPhase(rdPhase);
+    half phaseMainLight = GetMainLightPhase(rdPhase);
     float minusStepLengthTimesAbsortion = -stepLength * _Absortion;
                 
     float3 volumetricFogColor = float3(0.0, 0.0, 0.0);
-    float transmittance = 1.0;
+    half transmittance = 1.0;
 
     UNITY_LOOP
     for (int i = 0; i < _MaxSteps; ++i)
@@ -235,16 +236,16 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         if (density <= 0.0)
             continue;
 
-        float stepAttenuation = exp(minusStepLengthTimesAbsortion * density);
+        half stepAttenuation = exp(minusStepLengthTimesAbsortion * density);
         transmittance *= stepAttenuation;
 
-        float3 apvColor = GetStepAdaptiveProbeVolumeEvaluation(uv, currPosWS, density);
-        float3 mainLightColor = GetStepMainLightColor(currPosWS, phaseMainLight, density);
-        float3 additionalLightsColor = GetStepAdditionalLightsColor(uv, currPosWS, rd, density);
+        half3 apvColor = (half3)GetStepAdaptiveProbeVolumeEvaluation(uv, currPosWS, density);
+        half3 mainLightColor = (half3)GetStepMainLightColor(currPosWS, phaseMainLight, density);
+        half3 additionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density);
         
         // TODO: Additional contributions? Reflection probes, etc...
-        float3 stepColor = apvColor + mainLightColor + additionalLightsColor;
-        volumetricFogColor += (stepColor * (transmittance * stepLength));
+        half3 stepColor = apvColor + mainLightColor + additionalLightsColor;
+        volumetricFogColor += ((float3)stepColor * (transmittance * stepLength));
 
         UNITY_BRANCH
         if (_TransmittanceThreshold > 0.0 && transmittance <= _TransmittanceThreshold)
