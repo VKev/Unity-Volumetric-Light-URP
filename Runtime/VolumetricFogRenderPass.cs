@@ -158,6 +158,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static Color[] bakedDirectionPixelsCache;
 	private static Texture3D cachedBakedLightingTexture;
 	private static Texture3D cachedBakedDirectionTexture;
+	private static Hash128 cachedBakedLightingTextureContentsHash;
+	private static Hash128 cachedBakedDirectionTextureContentsHash;
 	private static int cachedBakedTextureWidth;
 	private static int cachedBakedTextureHeight;
 	private static int cachedBakedTextureDepth;
@@ -546,7 +548,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		}
 
 		UploadBakedVolumetricLightingParameters(volumetricFogMaterial, bakedLightingData, hasValidBakedLightingData, fogVolume.bakedIntensity.value);
-		bool enableBakedFroxelSampling = hasValidBakedLightingData;
+		bool enableBakedFroxelSampling = hasValidBakedLightingData && fogVolume.bakedUseFroxelSampling.value;
 		int bakedFroxelHash = 0;
 		if (enableBakedFroxelSampling)
 			enableBakedFroxelSampling = TryConfigureBakedFroxelSampling(volumetricFogMaterial, camera, bakedLightingData, debugRestrictToMainCameraFrustum, debugMainCameraFrustumPlanes, out bakedFroxelHash);
@@ -784,7 +786,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (lightingTexture == null)
 			return false;
 
+		Hash128 lightingContentsHash = lightingTexture.imageContentsHash;
 		bool lightingTextureChanged = cachedBakedLightingTexture != lightingTexture
+			|| cachedBakedLightingTextureContentsHash != lightingContentsHash
 			|| bakedLightingPixelsCache == null
 			|| cachedBakedTextureWidth != lightingTexture.width
 			|| cachedBakedTextureHeight != lightingTexture.height
@@ -796,6 +800,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			{
 				bakedLightingPixelsCache = lightingTexture.GetPixels();
 				cachedBakedLightingTexture = lightingTexture;
+				cachedBakedLightingTextureContentsHash = lightingContentsHash;
 				cachedBakedTextureWidth = lightingTexture.width;
 				cachedBakedTextureHeight = lightingTexture.height;
 				cachedBakedTextureDepth = lightingTexture.depth;
@@ -804,6 +809,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			{
 				bakedLightingPixelsCache = null;
 				cachedBakedLightingTexture = null;
+				cachedBakedLightingTextureContentsHash = default;
 				return false;
 			}
 		}
@@ -817,21 +823,27 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		{
 			bakedDirectionPixelsCache = null;
 			cachedBakedDirectionTexture = null;
+			cachedBakedDirectionTextureContentsHash = default;
 			return bakedLightingPixelsCache != null;
 		}
 
-		bool directionTextureChanged = cachedBakedDirectionTexture != directionTexture || bakedDirectionPixelsCache == null;
+		Hash128 directionContentsHash = directionTexture.imageContentsHash;
+		bool directionTextureChanged = cachedBakedDirectionTexture != directionTexture
+			|| cachedBakedDirectionTextureContentsHash != directionContentsHash
+			|| bakedDirectionPixelsCache == null;
 		if (directionTextureChanged)
 		{
 			try
 			{
 				bakedDirectionPixelsCache = directionTexture.GetPixels();
 				cachedBakedDirectionTexture = directionTexture;
+				cachedBakedDirectionTextureContentsHash = directionContentsHash;
 			}
 			catch (Exception)
 			{
 				bakedDirectionPixelsCache = null;
 				cachedBakedDirectionTexture = null;
+				cachedBakedDirectionTextureContentsHash = default;
 			}
 		}
 
@@ -1036,6 +1048,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 			hash = (hash * 31) + (bakedData != null && bakedData.LightingTexture != null ? bakedData.LightingTexture.GetHashCode() : 0);
 			hash = (hash * 31) + (bakedData != null && bakedData.DirectionTexture != null ? bakedData.DirectionTexture.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedData != null && bakedData.LightingTexture != null ? bakedData.LightingTexture.imageContentsHash.GetHashCode() : 0);
+			hash = (hash * 31) + (bakedData != null && bakedData.DirectionTexture != null ? bakedData.DirectionTexture.imageContentsHash.GetHashCode() : 0);
 			hash = (hash * 31) + (bakedData != null ? bakedData.BoundsCenter.GetHashCode() : 0);
 			hash = (hash * 31) + (bakedData != null ? bakedData.BoundsSize.GetHashCode() : 0);
 			return hash;
@@ -2041,6 +2055,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		bakedDirectionPixelsCache = null;
 		cachedBakedLightingTexture = null;
 		cachedBakedDirectionTexture = null;
+		cachedBakedLightingTextureContentsHash = default;
+		cachedBakedDirectionTextureContentsHash = default;
 		cachedBakedTextureWidth = 0;
 		cachedBakedTextureHeight = 0;
 		cachedBakedTextureDepth = 0;

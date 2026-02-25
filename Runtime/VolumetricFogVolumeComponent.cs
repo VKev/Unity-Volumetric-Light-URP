@@ -45,6 +45,8 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	public VolumetricFogBakedDataParameter bakedData = new VolumetricFogBakedDataParameter(null);
 	[Tooltip("Global multiplier for baked volumetric lighting contribution.")]
 	public ClampedFloatParameter bakedIntensity = new ClampedFloatParameter(1.0f, 0.0f, 8.0f);
+	[Tooltip("When enabled in HybridBaked mode, baked lighting is first projected into camera froxels for faster sampling. Disable for highest baked fidelity (closer to realtime).")]
+	public BoolParameter bakedUseFroxelSampling = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
 #if UNITY_2023_1_OR_NEWER
 	[Tooltip("When enabled, adaptive probe volumes (APV) will be sampled to contribute to fog.")]
 	public BoolParameter enableAPVContribution = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);

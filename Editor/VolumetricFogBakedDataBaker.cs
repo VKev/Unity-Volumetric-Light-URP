@@ -440,13 +440,13 @@ internal static class VolumetricFogBakedDataBaker
 			return Physics.Raycast(origin, directionToLight, maxDistance, settings.layerMask, QueryTriggerInteraction.Ignore);
 		}
 
-		Vector3 toSample = positionWS - light.position;
-		float distance = Mathf.Sqrt(Mathf.Max(Vector3.Dot(toSample, toSample), 0.000001f));
+		Vector3 toLight = light.position - positionWS;
+		float distance = Mathf.Sqrt(Mathf.Max(Vector3.Dot(toLight, toLight), 0.000001f));
 		if (distance <= settings.rayBias)
 			return false;
 
-		Vector3 direction = toSample / distance;
-		Vector3 rayOrigin = light.position + direction * settings.rayBias;
+		Vector3 direction = toLight / distance;
+		Vector3 rayOrigin = positionWS + direction * settings.rayBias;
 		float rayDistance = Mathf.Max(distance - settings.rayBias * 2.0f, 0.0f);
 		if (rayDistance <= 0.0f)
 			return false;
