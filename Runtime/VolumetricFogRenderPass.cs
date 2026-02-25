@@ -156,6 +156,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static bool debugDrawFroxelClusters;
 	private static bool debugDrawOnlyOccupiedFroxels = true;
 	private static int debugMaxFroxelsToDraw = 256;
+	private static bool debugDrawWorldSpaceCubes = true;
 	private static Color debugFroxelColor = new Color(0.0f, 1.0f, 1.0f, 1.0f);
 
 	private static bool isMaterialStateInitialized;
@@ -246,12 +247,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="enableDebugDrawing"></param>
 	/// <param name="drawOnlyOccupiedFroxels"></param>
 	/// <param name="maxFroxelsToDraw"></param>
+	/// <param name="drawWorldSpaceCubes"></param>
 	/// <param name="froxelColor"></param>
-	public void SetupFroxelDebugDrawing(bool enableDebugDrawing, bool drawOnlyOccupiedFroxels, int maxFroxelsToDraw, Color froxelColor)
+	public void SetupFroxelDebugDrawing(bool enableDebugDrawing, bool drawOnlyOccupiedFroxels, int maxFroxelsToDraw, bool drawWorldSpaceCubes, Color froxelColor)
 	{
 		debugDrawFroxelClusters = enableDebugDrawing;
 		debugDrawOnlyOccupiedFroxels = drawOnlyOccupiedFroxels;
 		debugMaxFroxelsToDraw = Mathf.Max(1, maxFroxelsToDraw);
+		debugDrawWorldSpaceCubes = drawWorldSpaceCubes;
 		debugFroxelColor = froxelColor;
 	}
 
@@ -922,17 +925,29 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		float near = Mathf.Max(camera.nearClipPlane, 0.01f);
 		float far = Mathf.Max(camera.farClipPlane, near + 0.01f);
 		int maxCellsToDraw = Mathf.Max(1, debugMaxFroxelsToDraw);
-		int drawnCells = 0;
+		int remainingCells = maxCellsToDraw;
+		int maxCellsPerSlice = Mathf.Max(1, maxCellsToDraw / FroxelGridDepth);
 
 		for (int z = 0; z < FroxelGridDepth; ++z)
 		{
+			if (remainingCells <= 0)
+				return;
+
 			float sliceNearDepth = FroxelSliceToDepth(z, near, far);
 			float sliceFarDepth = FroxelSliceToDepth(z + 1, near, far);
+			int sliceBudget = debugDrawWorldSpaceCubes ? remainingCells : Mathf.Min(remainingCells, maxCellsPerSlice);
+			int drawnInSlice = 0;
 
 			for (int y = 0; y < FroxelGridHeight; ++y)
 			{
+				if (drawnInSlice >= sliceBudget)
+					break;
+
 				for (int x = 0; x < FroxelGridWidth; ++x)
 				{
+					if (drawnInSlice >= sliceBudget || remainingCells <= 0)
+						break;
+
 					int froxelIndex = x + (y * FroxelGridWidth) + (z * FroxelGridWidth * FroxelGridHeight);
 					int lightCount = FroxelCellLightCounts[froxelIndex];
 					if (debugDrawOnlyOccupiedFroxels && lightCount <= 0)
@@ -952,11 +967,13 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 						drawColor *= 0.35f;
 					}
 
-					DrawFroxelCell(camera, x, y, sliceNearDepth, sliceFarDepth, drawColor);
-					drawnCells++;
+					if (debugDrawWorldSpaceCubes)
+						DrawFroxelCellWorldCube(camera, x, y, sliceNearDepth, sliceFarDepth, drawColor);
+					else
+						DrawFroxelCellFrustum(camera, x, y, sliceNearDepth, sliceFarDepth, drawColor);
 
-					if (drawnCells >= maxCellsToDraw)
-						return;
+					drawnInSlice++;
+					remainingCells--;
 				}
 			}
 		}
@@ -971,7 +988,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="nearDepth"></param>
 	/// <param name="farDepth"></param>
 	/// <param name="color"></param>
-	private static void DrawFroxelCell(Camera camera, int x, int y, float nearDepth, float farDepth, Color color)
+	private static void DrawFroxelCellFrustum(Camera camera, int x, int y, float nearDepth, float farDepth, Color color)
 	{
 		float u0 = x / (float)FroxelGridWidth;
 		float u1 = (x + 1) / (float)FroxelGridWidth;
@@ -989,22 +1006,88 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		Vector3 f01 = camera.ViewportToWorldPoint(new Vector3(u0, v1, farDepth));
 
 		// Near face.
-		Debug.DrawLine(n00, n10, color, 0.0f, false);
-		Debug.DrawLine(n10, n11, color, 0.0f, false);
-		Debug.DrawLine(n11, n01, color, 0.0f, false);
-		Debug.DrawLine(n01, n00, color, 0.0f, false);
+		Debug.DrawLine(n00, n10, color, 0.0f, true);
+		Debug.DrawLine(n10, n11, color, 0.0f, true);
+		Debug.DrawLine(n11, n01, color, 0.0f, true);
+		Debug.DrawLine(n01, n00, color, 0.0f, true);
 
 		// Far face.
-		Debug.DrawLine(f00, f10, color, 0.0f, false);
-		Debug.DrawLine(f10, f11, color, 0.0f, false);
-		Debug.DrawLine(f11, f01, color, 0.0f, false);
-		Debug.DrawLine(f01, f00, color, 0.0f, false);
+		Debug.DrawLine(f00, f10, color, 0.0f, true);
+		Debug.DrawLine(f10, f11, color, 0.0f, true);
+		Debug.DrawLine(f11, f01, color, 0.0f, true);
+		Debug.DrawLine(f01, f00, color, 0.0f, true);
 
 		// Side edges.
-		Debug.DrawLine(n00, f00, color, 0.0f, false);
-		Debug.DrawLine(n10, f10, color, 0.0f, false);
-		Debug.DrawLine(n11, f11, color, 0.0f, false);
-		Debug.DrawLine(n01, f01, color, 0.0f, false);
+		Debug.DrawLine(n00, f00, color, 0.0f, true);
+		Debug.DrawLine(n10, f10, color, 0.0f, true);
+		Debug.DrawLine(n11, f11, color, 0.0f, true);
+		Debug.DrawLine(n01, f01, color, 0.0f, true);
+	}
+
+	/// <summary>
+	/// Draws one occupied froxel as an approximate world-space cube.
+	/// </summary>
+	/// <param name="camera"></param>
+	/// <param name="x"></param>
+	/// <param name="y"></param>
+	/// <param name="nearDepth"></param>
+	/// <param name="farDepth"></param>
+	/// <param name="color"></param>
+	private static void DrawFroxelCellWorldCube(Camera camera, int x, int y, float nearDepth, float farDepth, Color color)
+	{
+		float u0 = x / (float)FroxelGridWidth;
+		float u1 = (x + 1) / (float)FroxelGridWidth;
+		float v0 = y / (float)FroxelGridHeight;
+		float v1 = (y + 1) / (float)FroxelGridHeight;
+		float uc = (u0 + u1) * 0.5f;
+		float vc = (v0 + v1) * 0.5f;
+		float depth = (nearDepth + farDepth) * 0.5f;
+
+		Vector3 center = camera.ViewportToWorldPoint(new Vector3(uc, vc, depth));
+		Vector3 worldX0 = camera.ViewportToWorldPoint(new Vector3(u0, vc, depth));
+		Vector3 worldX1 = camera.ViewportToWorldPoint(new Vector3(u1, vc, depth));
+		Vector3 worldY0 = camera.ViewportToWorldPoint(new Vector3(uc, v0, depth));
+		Vector3 worldY1 = camera.ViewportToWorldPoint(new Vector3(uc, v1, depth));
+
+		float width = Vector3.Distance(worldX0, worldX1);
+		float height = Vector3.Distance(worldY0, worldY1);
+		float cubeSize = Mathf.Max(0.001f, (width + height) * 0.5f);
+		float halfExtent = cubeSize * 0.45f;
+
+		DrawWorldSpaceWireCube(center, halfExtent, color);
+	}
+
+	/// <summary>
+	/// Draws an axis-aligned world-space wire cube.
+	/// </summary>
+	/// <param name="center"></param>
+	/// <param name="halfExtent"></param>
+	/// <param name="color"></param>
+	private static void DrawWorldSpaceWireCube(Vector3 center, float halfExtent, Color color)
+	{
+		Vector3 p000 = center + new Vector3(-halfExtent, -halfExtent, -halfExtent);
+		Vector3 p100 = center + new Vector3(halfExtent, -halfExtent, -halfExtent);
+		Vector3 p110 = center + new Vector3(halfExtent, halfExtent, -halfExtent);
+		Vector3 p010 = center + new Vector3(-halfExtent, halfExtent, -halfExtent);
+		Vector3 p001 = center + new Vector3(-halfExtent, -halfExtent, halfExtent);
+		Vector3 p101 = center + new Vector3(halfExtent, -halfExtent, halfExtent);
+		Vector3 p111 = center + new Vector3(halfExtent, halfExtent, halfExtent);
+		Vector3 p011 = center + new Vector3(-halfExtent, halfExtent, halfExtent);
+
+		Debug.DrawLine(p000, p100, color, 0.0f, true);
+		Debug.DrawLine(p100, p110, color, 0.0f, true);
+		Debug.DrawLine(p110, p010, color, 0.0f, true);
+		Debug.DrawLine(p010, p000, color, 0.0f, true);
+
+		Debug.DrawLine(p001, p101, color, 0.0f, true);
+		Debug.DrawLine(p101, p111, color, 0.0f, true);
+		Debug.DrawLine(p111, p011, color, 0.0f, true);
+		Debug.DrawLine(p011, p001, color, 0.0f, true);
+
+		Debug.DrawLine(p000, p001, color, 0.0f, true);
+		Debug.DrawLine(p100, p101, color, 0.0f, true);
+		Debug.DrawLine(p110, p111, color, 0.0f, true);
+		Debug.DrawLine(p010, p011, color, 0.0f, true);
 	}
 
 	/// <summary>

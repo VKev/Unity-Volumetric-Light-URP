@@ -29,6 +29,8 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	[Tooltip("Maximum number of froxel cells drawn each frame to keep debug cost bounded.")]
 	[Min(1)]
 	[SerializeField] private int debugMaxFroxelsToDraw = 256;
+	[Tooltip("Draw debug cells as world-space cubes instead of frustum-shaped froxels.")]
+	[SerializeField] private bool debugDrawWorldSpaceCubes = true;
 	[Tooltip("Color used for froxel debug lines.")]
 	[SerializeField] private Color debugFroxelColor = new Color(0.0f, 1.0f, 1.0f, 1.0f);
 
@@ -66,7 +68,7 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 		if (shouldAddVolumetricFogRenderPass)
 		{
 			volumetricFogRenderPass.SetupSceneViewMainCameraMask(shouldPreviewMainCameraRegionInSceneView, Camera.main);
-			volumetricFogRenderPass.SetupFroxelDebugDrawing(debugDrawFroxelClusters, debugDrawOnlyOccupiedFroxels, debugMaxFroxelsToDraw, debugFroxelColor);
+			volumetricFogRenderPass.SetupFroxelDebugDrawing(debugDrawFroxelClusters, debugDrawOnlyOccupiedFroxels, debugMaxFroxelsToDraw, debugDrawWorldSpaceCubes, debugFroxelColor);
 			volumetricFogRenderPass.renderPassEvent = GetRenderPassEvent(fogVolume);
 			volumetricFogRenderPass.ConfigureInput(ScriptableRenderPassInput.Depth);
 			renderer.EnqueuePass(volumetricFogRenderPass);
