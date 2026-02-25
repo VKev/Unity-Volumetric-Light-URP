@@ -15,6 +15,7 @@ internal static class VolumetricFogBakedDataBaker
 		public Vector3 direction;
 		public float rangeSq;
 		public float invRangeSq;
+		public float radiusSq;
 		public float scattering;
 		public float spotScale;
 		public float spotOffset;
@@ -255,6 +256,7 @@ internal static class VolumetricFogBakedDataBaker
 				rangeSq = Mathf.Max(light.range * light.range, 0.0001f),
 				scattering = scattering,
 				invRangeSq = 0.0f,
+				radiusSq = 0.04f,
 				spotScale = 0.0f,
 				spotOffset = 0.0f
 			};
@@ -262,6 +264,15 @@ internal static class VolumetricFogBakedDataBaker
 			if (light.type == LightType.Point || light.type == LightType.Spot)
 			{
 				bakedLight.invRangeSq = 1.0f / bakedLight.rangeSq;
+			}
+
+			if (light.type == LightType.Point || light.type == LightType.Spot)
+			{
+				float radius = 0.2f;
+				if (light.TryGetComponent(out VolumetricAdditionalLight volumetricAdditionalLightRadius))
+					radius = volumetricAdditionalLightRadius.Radius;
+
+				bakedLight.radiusSq = Mathf.Max(radius * radius, 0.000001f);
 			}
 
 			if (light.type == LightType.Spot)
@@ -282,6 +293,7 @@ internal static class VolumetricFogBakedDataBaker
 
 	private static Vector3 EvaluateBakedLightingAtPosition(Vector3 positionWS, List<BakedLightSample> bakedLights)
 	{
+		const float AveragePhase = 0.0795774715f; // 1 / (4 * PI), view-independent phase approximation.
 		Vector3 accumulatedColor = Vector3.zero;
 
 		for (int i = 0; i < bakedLights.Count; ++i)
@@ -290,7 +302,7 @@ internal static class VolumetricFogBakedDataBaker
 
 			if (light.type == LightType.Directional)
 			{
-				accumulatedColor += light.color * light.scattering;
+				accumulatedColor += light.color * (light.scattering * AveragePhase);
 				continue;
 			}
 
@@ -299,8 +311,19 @@ internal static class VolumetricFogBakedDataBaker
 			if (distanceSq >= light.rangeSq)
 				continue;
 
-			float attenuation = 1.0f - Mathf.Clamp01(distanceSq * light.invRangeSq);
-			attenuation *= attenuation;
+			// Approximate URP distance attenuation to avoid broad over-bright baked punctual contribution.
+			float distanceAttenuation = 1.0f / Mathf.Max(distanceSq, 0.0001f);
+			float smoothFactor = 1.0f - (distanceSq * light.invRangeSq);
+			smoothFactor = Mathf.Clamp01(smoothFactor);
+			smoothFactor *= smoothFactor;
+			float attenuation = distanceAttenuation * smoothFactor;
+
+			// Match runtime smoothing near light origin to reduce noise and energy spike.
+			float radiusSq = Mathf.Max(light.radiusSq, 0.000001f);
+			float radialFade = Mathf.Clamp01(distanceSq / radiusSq);
+			radialFade = radialFade * radialFade * (3.0f - (2.0f * radialFade));
+			radialFade *= radialFade;
+			attenuation *= radialFade;
 
 			if (light.type == LightType.Spot)
 			{
@@ -311,7 +334,7 @@ internal static class VolumetricFogBakedDataBaker
 				attenuation *= spotAttenuation * spotAttenuation;
 			}
 
-			accumulatedColor += light.color * (attenuation * light.scattering);
+			accumulatedColor += light.color * (attenuation * light.scattering * AveragePhase);
 		}
 
 		return accumulatedColor;
