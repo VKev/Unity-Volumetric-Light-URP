@@ -762,7 +762,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		Texture2DArray visibilityTextureArray = bakedLightingData.StaticVisibilityTextureArray;
 		VolumetricFogBakedStaticLightData[] staticLights = bakedLightingData.StaticLights;
-		int slicesPerLight = Mathf.Max(1, bakedLightingData.ResolutionZ);
+		int slicesPerLight = Mathf.Max(1, bakedLightingData.StaticVisibilityResolutionZ);
 		int textureLightCapacity = visibilityTextureArray.depth / slicesPerLight;
 		int staticLightsCount = Mathf.Min(staticLights.Length, MaxBakedStaticLights, textureLightCapacity);
 		float safeIntensity = Mathf.Max(0.0f, intensity);
@@ -851,7 +851,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.GetHashCode() : 0);
 			hash = (hash * 31) + (bakedLightingData != null && bakedLightingData.StaticVisibilityTextureArray != null ? bakedLightingData.StaticVisibilityTextureArray.GetHashCode() : 0);
 			hash = (hash * 31) + (bakedLightingData != null && bakedLightingData.StaticVisibilityTextureArray != null ? bakedLightingData.StaticVisibilityTextureArray.imageContentsHash.GetHashCode() : 0);
-			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.ResolutionZ : 0);
+			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.StaticVisibilityResolutionX : 0);
+			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.StaticVisibilityResolutionY : 0);
+			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.StaticVisibilityResolutionZ : 0);
 			hash = (hash * 31) + (bakedLightingData != null && bakedLightingData.StaticVisibilityTextureArray != null ? bakedLightingData.StaticVisibilityTextureArray.depth : 0);
 			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.BoundsCenter.GetHashCode() : 0);
 			hash = (hash * 31) + (bakedLightingData != null ? bakedLightingData.BoundsSize.GetHashCode() : 0);

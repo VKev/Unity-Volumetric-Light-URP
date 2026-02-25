@@ -11,6 +11,7 @@ internal static class VolumetricFogBakedDataBaker
 {
 	private const int MaxBakedStaticLights = 64;
 	private static readonly MethodInfo UrpGetLightAttenuationAndSpotDirectionMethod = ResolveUrpAttenuationMethod();
+	private static bool loggedStaticOccluderFallbackWarning;
 
 	private struct BakedOcclusionSettings
 	{
@@ -220,6 +221,10 @@ internal static class VolumetricFogBakedDataBaker
 		int resolutionX = Mathf.Clamp(bakedData.ResolutionX, 4, 256);
 		int resolutionY = Mathf.Clamp(bakedData.ResolutionY, 4, 256);
 		int resolutionZ = Mathf.Clamp(bakedData.ResolutionZ, 4, 256);
+		int visibilityResolutionMultiplier = Mathf.Clamp(bakedData.StaticVisibilityResolutionMultiplier, 1, 4);
+		int visibilityResolutionX = Mathf.Clamp(resolutionX * visibilityResolutionMultiplier, 4, 512);
+		int visibilityResolutionY = Mathf.Clamp(resolutionY * visibilityResolutionMultiplier, 4, 512);
+		int visibilityResolutionZ = Mathf.Clamp(resolutionZ * visibilityResolutionMultiplier, 4, 512);
 		int voxelCount = resolutionX * resolutionY * resolutionZ;
 		Color[] bakedLightingColors = new Color[voxelCount];
 		Color[] bakedDirectionColors = new Color[voxelCount];
@@ -247,6 +252,11 @@ internal static class VolumetricFogBakedDataBaker
 		{
 			occlusionSettings.layerMask = ~0;
 			Debug.LogWarning("Volumetric fog bake: Occluder Layer Mask was empty. Falling back to Everything to preserve baked shadow occlusion.", fogVolume);
+		}
+		if (occlusionSettings.enabled && occlusionSettings.staticOccludersOnly && !occlusionSettings.createTemporaryMeshColliders)
+		{
+			occlusionSettings.createTemporaryMeshColliders = true;
+			Debug.LogWarning("Volumetric fog bake: Static Occluders Only requires geometry colliders. Enabling temporary mesh colliders automatically for bake stability.", fogVolume);
 		}
 
 		using (TemporaryBakeColliderScope temporaryColliderScope = occlusionSettings.enabled && occlusionSettings.createTemporaryMeshColliders
@@ -300,7 +310,7 @@ internal static class VolumetricFogBakedDataBaker
 
 		Texture3D bakedLightingTexture = GetOrCreateBakedTextureAsset(bakedData, resolutionX, resolutionY, resolutionZ, isDirectionTexture: false);
 		Texture3D bakedDirectionTexture = GetOrCreateBakedTextureAsset(bakedData, resolutionX, resolutionY, resolutionZ, isDirectionTexture: true);
-		Texture2DArray bakedVisibilityTextureArray = GetOrCreateBakedVisibilityTextureArrayAsset(bakedData, resolutionX, resolutionY, resolutionZ, bakedLightsCount);
+		Texture2DArray bakedVisibilityTextureArray = GetOrCreateBakedVisibilityTextureArrayAsset(bakedData, visibilityResolutionX, visibilityResolutionY, visibilityResolutionZ, bakedLightsCount);
 		if (bakedLightingTexture == null || bakedDirectionTexture == null)
 			return false;
 
@@ -317,7 +327,7 @@ internal static class VolumetricFogBakedDataBaker
 			if (bakedVisibilityTextureArray == null)
 				return false;
 
-			if (!BakeStaticVisibilityTextureArray(bakedVisibilityTextureArray, bakedLights, occlusionSettings, boundsMin, boundsSize, resolutionX, resolutionY, resolutionZ, fogVolume))
+			if (!BakeStaticVisibilityTextureArray(bakedVisibilityTextureArray, bakedLights, occlusionSettings, boundsMin, boundsSize, visibilityResolutionX, visibilityResolutionY, visibilityResolutionZ, fogVolume))
 				return false;
 		}
 
@@ -327,6 +337,7 @@ internal static class VolumetricFogBakedDataBaker
 		bakedData.SetLightingTexture(bakedLightingTexture);
 		bakedData.SetDirectionTexture(bakedDirectionTexture);
 		bakedData.SetStaticVisibilityTextureArray(bakedLightsCount > 0 ? bakedVisibilityTextureArray : null);
+		bakedData.SetStaticVisibilityResolution(visibilityResolutionX, visibilityResolutionY, visibilityResolutionZ);
 		bakedData.SetStaticLights(staticLightsData);
 		bakedData.SetBakedLightsCount(bakedLightsCount);
 		EditorUtility.SetDirty(bakedLightingTexture);
@@ -395,7 +406,7 @@ internal static class VolumetricFogBakedDataBaker
 			textureArray = new Texture2DArray(resolutionX, resolutionY, layerCount, TextureFormat.RGBAHalf, false, true);
 			textureArray.name = "VolumetricFogBakedVisibility";
 			textureArray.wrapMode = TextureWrapMode.Clamp;
-			textureArray.filterMode = FilterMode.Bilinear;
+			textureArray.filterMode = FilterMode.Point;
 			textureArray.anisoLevel = 0;
 			textureArray.hideFlags = HideFlags.HideInHierarchy;
 			AssetDatabase.AddObjectToAsset(textureArray, bakedData);
@@ -403,7 +414,7 @@ internal static class VolumetricFogBakedDataBaker
 		else
 		{
 			textureArray.wrapMode = TextureWrapMode.Clamp;
-			textureArray.filterMode = FilterMode.Bilinear;
+			textureArray.filterMode = FilterMode.Point;
 			textureArray.anisoLevel = 0;
 			textureArray.hideFlags = HideFlags.HideInHierarchy;
 		}
@@ -800,14 +811,28 @@ internal static class VolumetricFogBakedDataBaker
 			return Physics.Raycast(rayOrigin, rayDirection, distance, settings.layerMask, QueryTriggerInteraction.Ignore);
 
 		RaycastHit[] hits = Physics.RaycastAll(rayOrigin, rayDirection, distance, settings.layerMask, QueryTriggerInteraction.Ignore);
+		bool anyColliderHit = false;
 		for (int i = 0; i < hits.Length; ++i)
 		{
 			Collider hitCollider = hits[i].collider;
 			if (hitCollider == null)
 				continue;
 
+			anyColliderHit = true;
 			if (IsHierarchyStatic(hitCollider.gameObject))
 				return true;
+		}
+
+		// Fallback to collider-based occlusion when static tagging is incomplete.
+		if (anyColliderHit)
+		{
+			if (!loggedStaticOccluderFallbackWarning)
+			{
+				Debug.LogWarning("Volumetric fog bake: static-occluder ray hit colliders without static flags. Falling back to collider occlusion to match runtime blocking.");
+				loggedStaticOccluderFallbackWarning = true;
+			}
+
+			return true;
 		}
 
 		return false;

@@ -210,13 +210,9 @@ float3 GetStepBakedStaticLightsColor(float3 currPosWS, float3 rd, float density)
 
         float slicesPerLight = max(_BakedStaticVisibilityTexParams.x, 1.0);
         float zCoord = bakedUv.z * (slicesPerLight - 1.0);
-        float z0 = floor(zCoord);
-        float z1 = min(z0 + 1.0, slicesPerLight - 1.0);
-        float zLerp = zCoord - z0;
+        float zSlice = round(zCoord);
         float layerBase = i * slicesPerLight;
-        float visibility0 = SAMPLE_TEXTURE2D_ARRAY(_BakedStaticVisibilityTexArray, sampler_BakedStaticVisibilityTexArray, bakedUv.xy, layerBase + z0).r;
-        float visibility1 = SAMPLE_TEXTURE2D_ARRAY(_BakedStaticVisibilityTexArray, sampler_BakedStaticVisibilityTexArray, bakedUv.xy, layerBase + z1).r;
-        float visibility = lerp(visibility0, visibility1, zLerp);
+        float visibility = SAMPLE_TEXTURE2D_ARRAY(_BakedStaticVisibilityTexArray, sampler_BakedStaticVisibilityTexArray, bakedUv.xy, layerBase + zSlice).r;
         attenuation *= visibility;
         UNITY_BRANCH
         if (attenuation <= 0.000001)
