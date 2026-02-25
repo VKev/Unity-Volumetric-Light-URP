@@ -406,7 +406,7 @@ internal static class VolumetricFogBakedDataBaker
 			textureArray = new Texture2DArray(resolutionX, resolutionY, layerCount, TextureFormat.RGBAHalf, false, true);
 			textureArray.name = "VolumetricFogBakedVisibility";
 			textureArray.wrapMode = TextureWrapMode.Clamp;
-			textureArray.filterMode = FilterMode.Point;
+			textureArray.filterMode = FilterMode.Bilinear;
 			textureArray.anisoLevel = 0;
 			textureArray.hideFlags = HideFlags.HideInHierarchy;
 			AssetDatabase.AddObjectToAsset(textureArray, bakedData);
@@ -414,7 +414,7 @@ internal static class VolumetricFogBakedDataBaker
 		else
 		{
 			textureArray.wrapMode = TextureWrapMode.Clamp;
-			textureArray.filterMode = FilterMode.Point;
+			textureArray.filterMode = FilterMode.Bilinear;
 			textureArray.anisoLevel = 0;
 			textureArray.hideFlags = HideFlags.HideInHierarchy;
 		}
