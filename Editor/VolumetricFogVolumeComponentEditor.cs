@@ -125,6 +125,8 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 			PropertyField(bakedData);
 			PropertyField(bakedIntensity);
 			PropertyField(bakedUseFroxelSampling);
+			if (bakedUseFroxelSampling.value.boolValue)
+				EditorGUILayout.HelpBox("Baked Use Froxel Sampling is faster but less accurate. Disable it for closest match to realtime.", MessageType.Warning);
 		}
 
 		VolumetricFogVolumeComponent fogVolume = target as VolumetricFogVolumeComponent;
@@ -136,6 +138,10 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 			{
 				VolumetricFogBakedData bakedAsset = fogVolume.bakedData.value;
 				EditorGUILayout.HelpBox($"Baked Data Resolution: {bakedAsset.ResolutionX} x {bakedAsset.ResolutionY} x {bakedAsset.ResolutionZ} | Baked Lights: {bakedAsset.BakedLightsCount}", MessageType.Info);
+				EditorGUILayout.HelpBox($"Shadow Bake: {(bakedAsset.EnableShadowOcclusion ? "On" : "Off")} | Temp Mesh Colliders: {(bakedAsset.CreateTemporaryMeshColliders ? "On" : "Off")} | Soft Samples: {(bakedAsset.EnableSoftShadowSampling ? bakedAsset.SoftShadowSampleCount.ToString() : "Off")}", MessageType.None);
+
+				if (GUILayout.Button("Select Baked Data Asset"))
+					Selection.activeObject = bakedAsset;
 			}
 
 			using (new EditorGUILayout.HorizontalScope())

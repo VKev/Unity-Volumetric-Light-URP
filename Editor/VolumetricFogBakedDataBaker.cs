@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
@@ -13,6 +14,11 @@ internal static class VolumetricFogBakedDataBaker
 		public int layerMask;
 		public float rayBias;
 		public float directionalDistance;
+		public bool createTemporaryMeshColliders;
+		public bool enableSoftShadowSampling;
+		public int softShadowSampleCount;
+		public float directionalSoftConeAngleRadians;
+		public float punctualSoftConeAngleRadians;
 	}
 
 	private struct BakedLightSample
@@ -29,6 +35,8 @@ internal static class VolumetricFogBakedDataBaker
 		public float spotScale;
 		public float spotOffset;
 		public bool castShadows;
+		public bool softShadows;
+		public float shadowStrength;
 	}
 
 	private struct BakedVoxelSample
@@ -36,6 +44,79 @@ internal static class VolumetricFogBakedDataBaker
 		public Vector3 color;
 		public Vector3 dominantDirection;
 		public float anisotropy;
+	}
+
+	/// <summary>
+	/// Temporary helper that creates mesh colliders for render-only geometry during bake and cleans them afterwards.
+	/// </summary>
+	private sealed class TemporaryBakeColliderScope : IDisposable
+	{
+		private readonly List<GameObject> temporaryColliderObjects = new List<GameObject>(256);
+
+		public int CreatedCollidersCount => temporaryColliderObjects.Count;
+
+		public static TemporaryBakeColliderScope Create(int layerMask)
+		{
+			TemporaryBakeColliderScope scope = new TemporaryBakeColliderScope();
+			scope.CreateTemporaryMeshColliders(layerMask);
+			return scope;
+		}
+
+		public void Dispose()
+		{
+			for (int i = 0; i < temporaryColliderObjects.Count; ++i)
+			{
+				GameObject go = temporaryColliderObjects[i];
+				if (go != null)
+					UnityEngine.Object.DestroyImmediate(go);
+			}
+
+			temporaryColliderObjects.Clear();
+		}
+
+		private void CreateTemporaryMeshColliders(int layerMask)
+		{
+#if UNITY_2023_1_OR_NEWER
+			Renderer[] renderers = UnityEngine.Object.FindObjectsByType<Renderer>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+#else
+			Renderer[] renderers = UnityEngine.Object.FindObjectsOfType<Renderer>();
+#endif
+
+			for (int i = 0; i < renderers.Length; ++i)
+			{
+				Renderer renderer = renderers[i];
+				if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy)
+					continue;
+
+				if (!(renderer is MeshRenderer))
+					continue;
+
+				int rendererLayerBit = 1 << renderer.gameObject.layer;
+				if ((layerMask & rendererLayerBit) == 0)
+					continue;
+
+				MeshFilter meshFilter = renderer.GetComponent<MeshFilter>();
+				if (meshFilter == null || meshFilter.sharedMesh == null)
+					continue;
+
+				if (renderer.GetComponent<Collider>() != null)
+					continue;
+
+				GameObject tempColliderObject = new GameObject("__VolumetricFogBakeCollider");
+				tempColliderObject.hideFlags = HideFlags.HideAndDontSave;
+				tempColliderObject.layer = renderer.gameObject.layer;
+				tempColliderObject.transform.SetParent(renderer.transform, false);
+				tempColliderObject.transform.localPosition = Vector3.zero;
+				tempColliderObject.transform.localRotation = Quaternion.identity;
+				tempColliderObject.transform.localScale = Vector3.one;
+
+				MeshCollider meshCollider = tempColliderObject.AddComponent<MeshCollider>();
+				meshCollider.sharedMesh = meshFilter.sharedMesh;
+				meshCollider.convex = false;
+
+				temporaryColliderObjects.Add(tempColliderObject);
+			}
+		}
 	}
 
 	/// <summary>
@@ -113,7 +194,7 @@ internal static class VolumetricFogBakedDataBaker
 		else if (defaultAdditionalScatteringLightsCount > 0)
 			Debug.LogWarning($"Volumetric fog bake used default scattering for {defaultAdditionalScatteringLightsCount} baked point/spot lights that are missing VolumetricAdditionalLight.", fogVolume);
 		if (bakedLightsCount > 0 && bakedData.EnableShadowOcclusion)
-			Debug.Log("Volumetric fog bake: collider-based occlusion is enabled. Baked lights with shadows will be blocked by colliders.", fogVolume);
+			Debug.Log("Volumetric fog bake: shadow occlusion sampling is enabled. Static baked lights will use precomputed shadow visibility.", fogVolume);
 
 		int resolutionX = Mathf.Clamp(bakedData.ResolutionX, 4, 256);
 		int resolutionY = Mathf.Clamp(bakedData.ResolutionY, 4, 256);
@@ -133,48 +214,61 @@ internal static class VolumetricFogBakedDataBaker
 			enabled = bakedData.EnableShadowOcclusion,
 			layerMask = bakedData.OccluderLayerMask,
 			rayBias = Mathf.Max(0.0f, bakedData.ShadowRayBias),
-			directionalDistance = Mathf.Max(1.0f, bakedData.DirectionalShadowDistance)
+			directionalDistance = Mathf.Max(1.0f, bakedData.DirectionalShadowDistance),
+			createTemporaryMeshColliders = bakedData.CreateTemporaryMeshColliders,
+			enableSoftShadowSampling = bakedData.EnableSoftShadowSampling,
+			softShadowSampleCount = Mathf.Clamp(bakedData.SoftShadowSampleCount, 1, 16),
+			directionalSoftConeAngleRadians = Mathf.Deg2Rad * Mathf.Max(0.0f, bakedData.DirectionalSoftShadowConeAngle),
+			punctualSoftConeAngleRadians = Mathf.Deg2Rad * Mathf.Max(0.0f, bakedData.PunctualSoftShadowConeAngle)
 		};
 
-		try
+		using (TemporaryBakeColliderScope temporaryColliderScope = occlusionSettings.enabled && occlusionSettings.createTemporaryMeshColliders
+			? TemporaryBakeColliderScope.Create(occlusionSettings.layerMask)
+			: null)
 		{
-			for (int z = 0; z < resolutionZ; ++z)
+			if (temporaryColliderScope != null && temporaryColliderScope.CreatedCollidersCount > 0)
+				Debug.Log($"Volumetric fog bake: created {temporaryColliderScope.CreatedCollidersCount} temporary mesh colliders for occlusion sampling.", fogVolume);
+
+			try
 			{
-				float progress = resolutionZ > 1 ? z / (float)(resolutionZ - 1) : 1.0f;
-				if (EditorUtility.DisplayCancelableProgressBar("Volumetric Fog Bake", "Baking baked lights into volumetric texture...", progress))
+				for (int z = 0; z < resolutionZ; ++z)
 				{
-					Debug.LogWarning("Volumetric fog bake cancelled by user.", fogVolume);
-					return false;
-				}
-
-				float vz = (z + 0.5f) * invResolutionZ;
-				float positionZ = boundsMin.z + vz * boundsSize.z;
-
-				for (int y = 0; y < resolutionY; ++y)
-				{
-					float vy = (y + 0.5f) * invResolutionY;
-					float positionY = boundsMin.y + vy * boundsSize.y;
-					int rowOffset = y * resolutionX + z * xyStride;
-
-					for (int x = 0; x < resolutionX; ++x)
+					float progress = resolutionZ > 1 ? z / (float)(resolutionZ - 1) : 1.0f;
+					if (EditorUtility.DisplayCancelableProgressBar("Volumetric Fog Bake", "Baking baked lights into volumetric texture...", progress))
 					{
-						float vx = (x + 0.5f) * invResolutionX;
-						float positionX = boundsMin.x + vx * boundsSize.x;
-						Vector3 positionWS = new Vector3(positionX, positionY, positionZ);
+						Debug.LogWarning("Volumetric fog bake cancelled by user.", fogVolume);
+						return false;
+					}
 
-						BakedVoxelSample sample = EvaluateBakedLightingAtPosition(positionWS, bakedLights, occlusionSettings);
-						int voxelIndex = rowOffset + x;
-						float anisotropyEncoded = Mathf.Clamp01(sample.anisotropy * 0.5f + 0.5f);
-						Vector3 directionEncoded = sample.dominantDirection * 0.5f + Vector3.one * 0.5f;
-						bakedLightingColors[voxelIndex] = new Color(sample.color.x, sample.color.y, sample.color.z, anisotropyEncoded);
-						bakedDirectionColors[voxelIndex] = new Color(directionEncoded.x, directionEncoded.y, directionEncoded.z, 1.0f);
+					float vz = (z + 0.5f) * invResolutionZ;
+					float positionZ = boundsMin.z + vz * boundsSize.z;
+
+					for (int y = 0; y < resolutionY; ++y)
+					{
+						float vy = (y + 0.5f) * invResolutionY;
+						float positionY = boundsMin.y + vy * boundsSize.y;
+						int rowOffset = y * resolutionX + z * xyStride;
+
+						for (int x = 0; x < resolutionX; ++x)
+						{
+							float vx = (x + 0.5f) * invResolutionX;
+							float positionX = boundsMin.x + vx * boundsSize.x;
+							Vector3 positionWS = new Vector3(positionX, positionY, positionZ);
+
+							BakedVoxelSample sample = EvaluateBakedLightingAtPosition(positionWS, bakedLights, occlusionSettings);
+							int voxelIndex = rowOffset + x;
+							float anisotropyEncoded = Mathf.Clamp01(sample.anisotropy * 0.5f + 0.5f);
+							Vector3 directionEncoded = sample.dominantDirection * 0.5f + Vector3.one * 0.5f;
+							bakedLightingColors[voxelIndex] = new Color(sample.color.x, sample.color.y, sample.color.z, anisotropyEncoded);
+							bakedDirectionColors[voxelIndex] = new Color(directionEncoded.x, directionEncoded.y, directionEncoded.z, 1.0f);
+						}
 					}
 				}
 			}
-		}
-		finally
-		{
-			EditorUtility.ClearProgressBar();
+			finally
+			{
+				EditorUtility.ClearProgressBar();
+			}
 		}
 
 		Texture3D bakedLightingTexture = GetOrCreateBakedTextureAsset(bakedData, resolutionX, resolutionY, resolutionZ, isDirectionTexture: false);
@@ -304,7 +398,9 @@ internal static class VolumetricFogBakedDataBaker
 				radiusSq = 0.04f,
 				spotScale = 0.0f,
 				spotOffset = 0.0f,
-				castShadows = light.shadows != LightShadows.None
+				castShadows = light.shadows != LightShadows.None,
+				softShadows = light.shadows == LightShadows.Soft,
+				shadowStrength = Mathf.Clamp01(light.shadowStrength)
 			};
 
 			if (light.type == LightType.Point || light.type == LightType.Spot)
@@ -352,20 +448,18 @@ internal static class VolumetricFogBakedDataBaker
 
 			if (light.type == LightType.Directional)
 			{
-				if (IsOccluded(positionWS, light, occlusionSettings))
+				float visibility = ComputeShadowVisibility(positionWS, light, occlusionSettings);
+				if (visibility <= 0.0001f)
 					continue;
 
 				directionToLight = -light.direction.normalized;
-				attenuation = 1.0f;
+				attenuation = visibility;
 			}
 			else
 			{
 				Vector3 toPoint = positionWS - light.position;
 				float distanceSq = Vector3.Dot(toPoint, toPoint);
 				if (distanceSq >= light.rangeSq)
-					continue;
-
-				if (IsOccluded(positionWS, light, occlusionSettings))
 					continue;
 
 				float distance = Mathf.Sqrt(Mathf.Max(distanceSq, 0.000001f));
@@ -392,6 +486,12 @@ internal static class VolumetricFogBakedDataBaker
 					float spotAttenuation = Mathf.Clamp01(cosAngle * light.spotScale + light.spotOffset);
 					attenuation *= spotAttenuation * spotAttenuation;
 				}
+
+				float visibility = ComputeShadowVisibility(positionWS, light, occlusionSettings);
+				if (visibility <= 0.0001f)
+					continue;
+
+				attenuation *= visibility;
 			}
 
 			Vector3 contribution = light.color * (attenuation * light.scattering);
@@ -427,31 +527,96 @@ internal static class VolumetricFogBakedDataBaker
 		return color.x * 0.2126f + color.y * 0.7152f + color.z * 0.0722f;
 	}
 
-	private static bool IsOccluded(Vector3 positionWS, in BakedLightSample light, in BakedOcclusionSettings settings)
+	private static float ComputeShadowVisibility(Vector3 positionWS, in BakedLightSample light, in BakedOcclusionSettings settings)
 	{
 		if (!settings.enabled || !light.castShadows)
-			return false;
+			return 1.0f;
+
+		Vector3 baseDirectionToLight;
+		float maxDistance;
 
 		if (light.type == LightType.Directional)
 		{
-			Vector3 directionToLight = -light.direction.normalized;
-			float maxDistance = settings.directionalDistance;
-			Vector3 origin = positionWS + directionToLight * settings.rayBias;
-			return Physics.Raycast(origin, directionToLight, maxDistance, settings.layerMask, QueryTriggerInteraction.Ignore);
+			baseDirectionToLight = -light.direction.normalized;
+			maxDistance = settings.directionalDistance;
+		}
+		else
+		{
+			Vector3 toLight = light.position - positionWS;
+			float distance = Mathf.Sqrt(Mathf.Max(Vector3.Dot(toLight, toLight), 0.000001f));
+			if (distance <= settings.rayBias)
+				return 1.0f;
+
+			baseDirectionToLight = toLight / distance;
+			maxDistance = Mathf.Max(distance - settings.rayBias * 2.0f, 0.0f);
+			if (maxDistance <= 0.0f)
+				return 1.0f;
 		}
 
-		Vector3 toLight = light.position - positionWS;
-		float distance = Mathf.Sqrt(Mathf.Max(Vector3.Dot(toLight, toLight), 0.000001f));
-		if (distance <= settings.rayBias)
+		int sampleCount = 1;
+		float coneAngleRadians = 0.0f;
+		if (settings.enableSoftShadowSampling && light.softShadows)
+		{
+			sampleCount = Mathf.Clamp(settings.softShadowSampleCount, 1, 16);
+			coneAngleRadians = light.type == LightType.Directional
+				? settings.directionalSoftConeAngleRadians
+				: settings.punctualSoftConeAngleRadians;
+			if (coneAngleRadians <= 0.0001f)
+				sampleCount = 1;
+		}
+
+		int visibleSamples = 0;
+		for (int sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
+		{
+			Vector3 sampleDirection = sampleCount > 1
+				? GetConeSampleDirection(baseDirectionToLight, sampleIndex, sampleCount, coneAngleRadians)
+				: baseDirectionToLight;
+
+			Vector3 rayOrigin = positionWS + sampleDirection * settings.rayBias;
+			bool occluded = RaycastOccluder(rayOrigin, sampleDirection, maxDistance, settings.layerMask);
+			if (!occluded)
+				visibleSamples++;
+		}
+
+		float visibility = visibleSamples / (float)sampleCount;
+		return Mathf.Lerp(1.0f, visibility, light.shadowStrength);
+	}
+
+	private static bool RaycastOccluder(Vector3 rayOrigin, Vector3 rayDirection, float distance, int layerMask)
+	{
+		if (distance <= 0.0f)
 			return false;
 
-		Vector3 direction = toLight / distance;
-		Vector3 rayOrigin = positionWS + direction * settings.rayBias;
-		float rayDistance = Mathf.Max(distance - settings.rayBias * 2.0f, 0.0f);
-		if (rayDistance <= 0.0f)
-			return false;
+		return Physics.Raycast(rayOrigin, rayDirection, distance, layerMask, QueryTriggerInteraction.Ignore);
+	}
 
-		return Physics.Raycast(rayOrigin, direction, rayDistance, settings.layerMask, QueryTriggerInteraction.Ignore);
+	private static Vector3 GetConeSampleDirection(Vector3 baseDirection, int sampleIndex, int sampleCount, float coneAngleRadians)
+	{
+		if (sampleCount <= 1 || coneAngleRadians <= 0.0001f)
+			return baseDirection;
+
+		BuildOrthonormalBasis(baseDirection, out Vector3 tangent, out Vector3 bitangent);
+
+		float t = (sampleIndex + 0.5f) / sampleCount;
+		float radius01 = Mathf.Sqrt(t);
+		float phi = sampleIndex * 2.39996323f;
+		float sinPhi = Mathf.Sin(phi);
+		float cosPhi = Mathf.Cos(phi);
+		float sampleAngle = coneAngleRadians * radius01;
+		float sinSampleAngle = Mathf.Sin(sampleAngle);
+		float cosSampleAngle = Mathf.Cos(sampleAngle);
+
+		Vector3 sampleDirection = (baseDirection * cosSampleAngle)
+			+ (tangent * (cosPhi * sinSampleAngle))
+			+ (bitangent * (sinPhi * sinSampleAngle));
+		return sampleDirection.normalized;
+	}
+
+	private static void BuildOrthonormalBasis(Vector3 normal, out Vector3 tangent, out Vector3 bitangent)
+	{
+		Vector3 up = Mathf.Abs(normal.y) < 0.99f ? Vector3.up : Vector3.right;
+		tangent = Vector3.Cross(up, normal).normalized;
+		bitangent = Vector3.Cross(normal, tangent);
 	}
 
 	private static bool IsLightConfiguredAsBaked(Light light)

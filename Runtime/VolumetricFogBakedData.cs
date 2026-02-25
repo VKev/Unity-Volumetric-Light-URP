@@ -28,10 +28,20 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	[SerializeField] private bool enableShadowOcclusion = true;
 	[Tooltip("Layer mask used to test baked shadow occlusion against colliders.")]
 	[SerializeField] private LayerMask occluderLayerMask = ~0;
+	[Tooltip("When enabled, temporary mesh colliders are created for MeshRenderers that have no Collider so shadow bake can include render geometry too.")]
+	[SerializeField] private bool createTemporaryMeshColliders = true;
 	[Tooltip("Bias used on baked shadow rays to avoid immediate self-hits.")]
 	[SerializeField, Min(0.0f)] private float shadowRayBias = 0.02f;
 	[Tooltip("Maximum ray distance for directional baked shadow occlusion.")]
 	[SerializeField, Min(1.0f)] private float directionalShadowDistance = 500.0f;
+	[Tooltip("When enabled, soft shadows are approximated by multi-ray cone sampling during bake.")]
+	[SerializeField] private bool enableSoftShadowSampling = true;
+	[Tooltip("Number of rays used for soft shadow cone sampling. Higher values improve quality but increase bake time.")]
+	[SerializeField, Range(1, 16)] private int softShadowSampleCount = 4;
+	[Tooltip("Cone angle in degrees used for directional light soft shadow sampling.")]
+	[SerializeField, Range(0.0f, 10.0f)] private float directionalSoftShadowConeAngle = 1.5f;
+	[Tooltip("Cone angle in degrees used for point/spot light soft shadow sampling.")]
+	[SerializeField, Range(0.0f, 10.0f)] private float punctualSoftShadowConeAngle = 2.0f;
 
 	#endregion
 
@@ -48,8 +58,13 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	public int BakedLightsCount => bakedLightsCount;
 	public bool EnableShadowOcclusion => enableShadowOcclusion;
 	public int OccluderLayerMask => occluderLayerMask.value;
+	public bool CreateTemporaryMeshColliders => createTemporaryMeshColliders;
 	public float ShadowRayBias => shadowRayBias;
 	public float DirectionalShadowDistance => directionalShadowDistance;
+	public bool EnableSoftShadowSampling => enableSoftShadowSampling;
+	public int SoftShadowSampleCount => softShadowSampleCount;
+	public float DirectionalSoftShadowConeAngle => directionalSoftShadowConeAngle;
+	public float PunctualSoftShadowConeAngle => punctualSoftShadowConeAngle;
 
 	public bool IsValid
 	{
@@ -93,6 +108,9 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 		bakedLightsCount = Mathf.Max(0, bakedLightsCount);
 		shadowRayBias = Mathf.Max(0.0f, shadowRayBias);
 		directionalShadowDistance = Mathf.Max(1.0f, directionalShadowDistance);
+		softShadowSampleCount = Mathf.Clamp(softShadowSampleCount, 1, 16);
+		directionalSoftShadowConeAngle = Mathf.Clamp(directionalSoftShadowConeAngle, 0.0f, 10.0f);
+		punctualSoftShadowConeAngle = Mathf.Clamp(punctualSoftShadowConeAngle, 0.0f, 10.0f);
 	}
 
 	#endregion
