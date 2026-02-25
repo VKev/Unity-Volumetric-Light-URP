@@ -44,13 +44,16 @@ internal static class VolumetricFogBakedDataBaker
 		if (!Bake(fogVolume, bakedData, out int bakedLightsCount))
 			return;
 
-		Undo.RecordObject(fogVolume, "Set Volumetric Fog Hybrid Baked Mode");
-		fogVolume.lightingMode.value = VolumetricFogLightingMode.HybridBaked;
+		Undo.RecordObject(fogVolume, "Set Volumetric Fog Lighting Mode");
+		fogVolume.lightingMode.value = bakedLightsCount > 0 ? VolumetricFogLightingMode.HybridBaked : VolumetricFogLightingMode.RuntimeOnly;
 		fogVolume.lightingMode.overrideState = true;
 		fogVolume.bakedData.overrideState = true;
 		EditorUtility.SetDirty(fogVolume);
 
-		Debug.Log($"Volumetric fog bake completed. Baked lights: {bakedLightsCount}. Mode switched to HybridBaked.", fogVolume);
+		if (bakedLightsCount > 0)
+			Debug.Log($"Volumetric fog bake completed. Baked lights: {bakedLightsCount}. Mode switched to HybridBaked.", fogVolume);
+		else
+			Debug.LogWarning("Volumetric fog bake completed with 0 baked lights. Lighting mode stayed RuntimeOnly so realtime fallback is preserved.", fogVolume);
 	}
 
 	/// <summary>
@@ -68,6 +71,7 @@ internal static class VolumetricFogBakedDataBaker
 
 		Undo.RecordObject(bakedData, "Clear Volumetric Fog Baked Texture");
 		bakedData.SetLightingTexture(null);
+		bakedData.SetBakedLightsCount(0);
 		EditorUtility.SetDirty(bakedData);
 		AssetDatabase.SaveAssets();
 	}
@@ -83,10 +87,12 @@ internal static class VolumetricFogBakedDataBaker
 			return false;
 		}
 
-		List<BakedLightSample> bakedLights = CollectBakedLights(fogVolume);
+		List<BakedLightSample> bakedLights = CollectBakedLights(fogVolume, out int defaultAdditionalScatteringLightsCount);
 		bakedLightsCount = bakedLights.Count;
 		if (bakedLightsCount == 0)
-			Debug.LogWarning("Volumetric fog bake found no lights with Lightmap Bake Type = Baked that contribute to fog. A black baked texture will be generated.", fogVolume);
+			Debug.LogWarning("Volumetric fog bake found no lights with Lightmap Bake Type = Baked that contribute to fog. Check light bake mode and fog contribution toggles. A black baked texture will be generated.", fogVolume);
+		else if (defaultAdditionalScatteringLightsCount > 0)
+			Debug.LogWarning($"Volumetric fog bake used default scattering for {defaultAdditionalScatteringLightsCount} baked point/spot lights that are missing VolumetricAdditionalLight.", fogVolume);
 
 		int resolutionX = Mathf.Clamp(bakedData.ResolutionX, 4, 256);
 		int resolutionY = Mathf.Clamp(bakedData.ResolutionY, 4, 256);
@@ -147,6 +153,7 @@ internal static class VolumetricFogBakedDataBaker
 
 		Undo.RecordObject(bakedData, "Bake Volumetric Fog Lighting");
 		bakedData.SetLightingTexture(bakedTexture);
+		bakedData.SetBakedLightsCount(bakedLightsCount);
 		EditorUtility.SetDirty(bakedTexture);
 		EditorUtility.SetDirty(bakedData);
 
@@ -184,9 +191,10 @@ internal static class VolumetricFogBakedDataBaker
 		return texture;
 	}
 
-	private static List<BakedLightSample> CollectBakedLights(VolumetricFogVolumeComponent fogVolume)
+	private static List<BakedLightSample> CollectBakedLights(VolumetricFogVolumeComponent fogVolume, out int defaultAdditionalScatteringLightsCount)
 	{
 		List<BakedLightSample> bakedLights = new List<BakedLightSample>(32);
+		defaultAdditionalScatteringLightsCount = 0;
 
 #if UNITY_2023_1_OR_NEWER
 		Light[] sceneLights = UnityEngine.Object.FindObjectsByType<Light>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
@@ -233,8 +241,12 @@ internal static class VolumetricFogBakedDataBaker
 			}
 			else
 			{
-				// Keep behavior aligned with runtime path where additional light contribution requires this component.
-				continue;
+				if (!additionalLightsContributionEnabled)
+					continue;
+
+				// Allow baked contribution for point/spot lights without VolumetricAdditionalLight using a default scattering.
+				scattering = 1.0f;
+				defaultAdditionalScatteringLightsCount++;
 			}
 
 			if (scattering <= 0.0001f)

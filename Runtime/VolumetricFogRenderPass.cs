@@ -515,7 +515,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		bool useHybridBakedMode = fogVolume.lightingMode.value == VolumetricFogLightingMode.HybridBaked;
 		VolumetricFogBakedData bakedLightingData = useHybridBakedMode ? fogVolume.bakedData.value : null;
-		bool hasValidBakedLightingData = useHybridBakedMode && bakedLightingData != null && bakedLightingData.IsValid && fogVolume.bakedIntensity.value > 0.0f;
+		bool hasValidBakedLightingData = useHybridBakedMode && bakedLightingData != null && bakedLightingData.IsValid && bakedLightingData.BakedLightsCount > 0 && fogVolume.bakedIntensity.value > 0.0f;
 		bool classifyLightsByBakeType = hasValidBakedLightingData;
 
 		if (!isMaterialStateInitialized || cachedBakedVolumetricLightingEnabled != hasValidBakedLightingData)

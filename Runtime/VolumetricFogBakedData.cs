@@ -20,6 +20,8 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	[SerializeField, Min(4)] private int resolutionY = 32;
 	[Tooltip("Bake resolution in Z.")]
 	[SerializeField, Min(4)] private int resolutionZ = 64;
+	[Tooltip("Number of baked lights captured in the current baked texture.")]
+	[SerializeField, Min(0)] private int bakedLightsCount = 0;
 
 	#endregion
 
@@ -32,6 +34,7 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	public int ResolutionY => resolutionY;
 	public int ResolutionZ => resolutionZ;
 	public Vector3Int Resolution => new Vector3Int(resolutionX, resolutionY, resolutionZ);
+	public int BakedLightsCount => bakedLightsCount;
 
 	public bool IsValid
 	{
@@ -50,6 +53,11 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 		lightingTexture = texture;
 	}
 
+	public void SetBakedLightsCount(int count)
+	{
+		bakedLightsCount = Mathf.Max(0, count);
+	}
+
 	#endregion
 
 	#region ScriptableObject Methods
@@ -62,6 +70,7 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 		resolutionX = Mathf.Clamp(resolutionX, 4, 256);
 		resolutionY = Mathf.Clamp(resolutionY, 4, 256);
 		resolutionZ = Mathf.Clamp(resolutionZ, 4, 256);
+		bakedLightsCount = Mathf.Max(0, bakedLightsCount);
 	}
 
 	#endregion

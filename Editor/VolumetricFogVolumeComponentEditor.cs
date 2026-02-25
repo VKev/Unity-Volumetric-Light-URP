@@ -132,7 +132,7 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 			else
 			{
 				VolumetricFogBakedData bakedAsset = fogVolume.bakedData.value;
-				EditorGUILayout.HelpBox($"Baked Data Resolution: {bakedAsset.ResolutionX} x {bakedAsset.ResolutionY} x {bakedAsset.ResolutionZ}", MessageType.Info);
+				EditorGUILayout.HelpBox($"Baked Data Resolution: {bakedAsset.ResolutionX} x {bakedAsset.ResolutionY} x {bakedAsset.ResolutionZ} | Baked Lights: {bakedAsset.BakedLightsCount}", MessageType.Info);
 			}
 
 			using (new EditorGUILayout.HorizontalScope())
@@ -141,7 +141,7 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 				{
 					serializedObject.ApplyModifiedProperties();
 					VolumetricFogBakedDataBaker.BakeFromVolume(fogVolume);
-					serializedObject.Update();
+					GUIUtility.ExitGUI();
 				}
 
 				using (new EditorGUI.DisabledScope(fogVolume.bakedData.value == null))
@@ -150,7 +150,7 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 					{
 						serializedObject.ApplyModifiedProperties();
 						VolumetricFogBakedDataBaker.ClearBakedTexture(fogVolume);
-						serializedObject.Update();
+						GUIUtility.ExitGUI();
 					}
 				}
 			}
