@@ -82,18 +82,13 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	[Tooltip("Cone angle in degrees used for point/spot light soft shadow sampling.")]
 	[SerializeField, Range(0.0f, 10.0f)] private float punctualSoftShadowConeAngle = 2.0f;
 	[Tooltip("Multiplier applied to baked static-visibility resolution relative to base bake resolution. Higher values improve blocker fidelity but increase bake time and memory.")]
-	[SerializeField, Range(1, 8)] private int staticVisibilityResolutionMultiplier = 4;
+	[SerializeField, Range(1, 4)] private int staticVisibilityResolutionMultiplier = 4;
 	[Tooltip("Actual baked static visibility resolution X.")]
 	[SerializeField, Min(1)] private int staticVisibilityResolutionX = 64;
 	[Tooltip("Actual baked static visibility resolution Y.")]
 	[SerializeField, Min(1)] private int staticVisibilityResolutionY = 32;
 	[Tooltip("Actual baked static visibility resolution Z.")]
 	[SerializeField, Min(1)] private int staticVisibilityResolutionZ = 64;
-	[Tooltip("Sub-voxel samples used per static-visibility texel. Higher values better preserve blocker edges but increase bake time.")]
-	[SerializeField, Range(1, 16)] private int staticVisibilitySupersampleCount = 9;
-	[Tooltip("When enabled, uses the minimum visibility across sub-voxel samples to reduce light leaking and preserve hard shadow transitions.")]
-	[SerializeField] private bool staticVisibilityConservativeOcclusion = true;
-
 	#endregion
 
 	#region Public Attributes
@@ -120,12 +115,10 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	public int SoftShadowSampleCount => softShadowSampleCount;
 	public float DirectionalSoftShadowConeAngle => directionalSoftShadowConeAngle;
 	public float PunctualSoftShadowConeAngle => punctualSoftShadowConeAngle;
-	public int StaticVisibilityResolutionMultiplier => Mathf.Clamp(staticVisibilityResolutionMultiplier, 1, 8);
+	public int StaticVisibilityResolutionMultiplier => Mathf.Clamp(staticVisibilityResolutionMultiplier, 1, 4);
 	public int StaticVisibilityResolutionX => Mathf.Max(1, staticVisibilityResolutionX);
 	public int StaticVisibilityResolutionY => Mathf.Max(1, staticVisibilityResolutionY);
 	public int StaticVisibilityResolutionZ => Mathf.Max(1, staticVisibilityResolutionZ);
-	public int StaticVisibilitySupersampleCount => Mathf.Clamp(staticVisibilitySupersampleCount, 1, 16);
-	public bool StaticVisibilityConservativeOcclusion => staticVisibilityConservativeOcclusion;
 
 	public bool HasStaticLightsData
 	{
@@ -218,11 +211,10 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 		softShadowSampleCount = Mathf.Clamp(softShadowSampleCount, 1, 16);
 		directionalSoftShadowConeAngle = Mathf.Clamp(directionalSoftShadowConeAngle, 0.0f, 10.0f);
 		punctualSoftShadowConeAngle = Mathf.Clamp(punctualSoftShadowConeAngle, 0.0f, 10.0f);
-		staticVisibilityResolutionMultiplier = Mathf.Clamp(staticVisibilityResolutionMultiplier, 1, 8);
+		staticVisibilityResolutionMultiplier = Mathf.Clamp(staticVisibilityResolutionMultiplier, 1, 4);
 		staticVisibilityResolutionX = Mathf.Clamp(staticVisibilityResolutionX, 1, 1024);
 		staticVisibilityResolutionY = Mathf.Clamp(staticVisibilityResolutionY, 1, 1024);
 		staticVisibilityResolutionZ = Mathf.Clamp(staticVisibilityResolutionZ, 1, 1024);
-		staticVisibilitySupersampleCount = Mathf.Clamp(staticVisibilitySupersampleCount, 1, 16);
 		if (staticLights == null)
 			staticLights = Array.Empty<VolumetricFogBakedStaticLightData>();
 	}

@@ -39,13 +39,13 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	public ClampedFloatParameter density = new ClampedFloatParameter(0.2f, 0.0f, 1.0f);
 	[Tooltip("Value that defines how much the fog attenuates light as distance increases. Lesser values lead to a darker image.")]
 	public MinFloatParameter attenuationDistance = new MinFloatParameter(128.0f, 0.05f);
-	[Tooltip("RuntimeOnly evaluates all fog lighting in real time. HybridBaked uses baked volumetric data for baked lights and realtime evaluation for realtime lights.")]
+	[Tooltip("RuntimeOnly evaluates all fog lighting in real time. HybridBaked uses precomputed static-light volumetric data for baked lights while keeping camera-dependent integration and realtime-light evaluation at runtime.")]
 	public VolumetricFogLightingModeParameter lightingMode = new VolumetricFogLightingModeParameter(VolumetricFogLightingMode.RuntimeOnly);
-	[Tooltip("Baked volumetric lighting asset used in HybridBaked mode. If missing, fog falls back to runtime evaluation.")]
+	[Tooltip("Baked volumetric lighting asset used in HybridBaked mode. It stores static-light/static-geometry precompute data. If missing, fog falls back to runtime evaluation.")]
 	public VolumetricFogBakedDataParameter bakedData = new VolumetricFogBakedDataParameter(null);
 	[Tooltip("Global multiplier for baked volumetric lighting contribution.")]
 	public ClampedFloatParameter bakedIntensity = new ClampedFloatParameter(1.0f, 0.0f, 8.0f);
-	[Tooltip("When enabled in HybridBaked mode, baked lighting is first projected into camera froxels for faster sampling. Disable for highest baked fidelity (closer to realtime).")]
+	[Tooltip("When enabled in HybridBaked mode, baked volumetric textures are projected into camera froxels for faster sampling. Disable for highest baked fidelity.")]
 	public BoolParameter bakedUseFroxelSampling = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
 #if UNITY_2023_1_OR_NEWER
 	[Tooltip("When enabled, adaptive probe volumes (APV) will be sampled to contribute to fog.")]

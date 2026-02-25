@@ -550,15 +550,22 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		bool useHybridBakedMode = fogVolume.lightingMode.value == VolumetricFogLightingMode.HybridBaked;
 		VolumetricFogBakedData bakedLightingData = useHybridBakedMode ? fogVolume.bakedData.value : null;
-		bool hasValidBakedStaticLightsData = useHybridBakedMode
+		float bakedIntensity = fogVolume.bakedIntensity.value;
+		bool hasValidBakedLightingData = useHybridBakedMode
+			&& bakedLightingData != null
+			&& bakedLightingData.IsValid
+			&& bakedLightingData.LightingTexture != null
+			&& bakedLightingData.BakedLightsCount > 0
+			&& bakedIntensity > 0.0f;
+		// Fallback path: if full baked volumetric data is unavailable, use static-light runtime
+		// evaluation with precomputed visibility volumes.
+		bool hasValidBakedStaticLightsData = !hasValidBakedLightingData
+			&& useHybridBakedMode
 			&& bakedLightingData != null
 			&& bakedLightingData.HasStaticLightsData
 			&& bakedLightingData.BakedLightsCount > 0
-			&& fogVolume.bakedIntensity.value > 0.0f;
-		// Hybrid mode intentionally avoids camera-dependent pre-integration bake paths.
-		// Only static-light visibility is baked; camera/view-dependent terms are reconstructed at runtime.
-		bool hasValidBakedLightingData = false;
-		bool classifyLightsByBakeType = hasValidBakedStaticLightsData;
+			&& bakedIntensity > 0.0f;
+		bool classifyLightsByBakeType = hasValidBakedLightingData || hasValidBakedStaticLightsData;
 
 		if (!isMaterialStateInitialized || cachedBakedVolumetricLightingEnabled != hasValidBakedLightingData)
 		{
@@ -570,8 +577,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			cachedBakedVolumetricLightingEnabled = hasValidBakedLightingData;
 		}
 
-		UploadBakedVolumetricLightingParameters(volumetricFogMaterial, bakedLightingData, hasValidBakedLightingData, fogVolume.bakedIntensity.value);
-		UploadBakedStaticLightsParameters(volumetricFogMaterial, bakedLightingData, hasValidBakedStaticLightsData, fogVolume.bakedIntensity.value);
+		UploadBakedVolumetricLightingParameters(volumetricFogMaterial, bakedLightingData, hasValidBakedLightingData, bakedIntensity);
+		UploadBakedStaticLightsParameters(volumetricFogMaterial, bakedLightingData, hasValidBakedStaticLightsData, bakedIntensity);
 		bool enableBakedFroxelSampling = hasValidBakedLightingData && fogVolume.bakedUseFroxelSampling.value;
 		int bakedFroxelHash = 0;
 		if (enableBakedFroxelSampling)
