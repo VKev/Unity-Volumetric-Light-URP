@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Reflection;
 using UnityEditor;
 using UnityEngine;
-using UnityEngine.Rendering.Universal;
 
 /// <summary>
 /// Editor utility that bakes volumetric lighting from baked lights into a 3D texture asset.
@@ -857,7 +856,23 @@ internal static class VolumetricFogBakedDataBaker
 
 	private static MethodInfo ResolveUrpAttenuationMethod()
 	{
-		MethodInfo[] methods = typeof(UniversalRenderPipeline).GetMethods(BindingFlags.Public | BindingFlags.Static);
+		Type urpType = Type.GetType("UnityEngine.Rendering.Universal.UniversalRenderPipeline, Unity.RenderPipelines.Universal.Runtime");
+		if (urpType == null)
+		{
+			Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
+			for (int assemblyIndex = 0; assemblyIndex < assemblies.Length; ++assemblyIndex)
+			{
+				Assembly assembly = assemblies[assemblyIndex];
+				urpType = assembly.GetType("UnityEngine.Rendering.Universal.UniversalRenderPipeline");
+				if (urpType != null)
+					break;
+			}
+		}
+
+		if (urpType == null)
+			return null;
+
+		MethodInfo[] methods = urpType.GetMethods(BindingFlags.Public | BindingFlags.Static);
 		for (int i = 0; i < methods.Length; ++i)
 		{
 			MethodInfo method = methods[i];
