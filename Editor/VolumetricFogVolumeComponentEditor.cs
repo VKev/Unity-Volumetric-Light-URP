@@ -133,6 +133,7 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 			{
 				VolumetricFogBakedData bakedAsset = fogVolume.bakedData.value;
 				EditorGUILayout.HelpBox($"Baked Data Resolution: {bakedAsset.ResolutionX} x {bakedAsset.ResolutionY} x {bakedAsset.ResolutionZ} | Visibility Resolution: {bakedAsset.StaticVisibilityResolutionX} x {bakedAsset.StaticVisibilityResolutionY} x {bakedAsset.StaticVisibilityResolutionZ} | Baked Lights: {bakedAsset.BakedLightsCount}", MessageType.Info);
+				EditorGUILayout.HelpBox($"Visibility Supersamples: {bakedAsset.StaticVisibilitySupersampleCount} | Conservative Occlusion: {(bakedAsset.StaticVisibilityConservativeOcclusion ? "On" : "Off")} | Resolution Multiplier: {bakedAsset.StaticVisibilityResolutionMultiplier}x", MessageType.None);
 				EditorGUILayout.HelpBox($"Shadow Bake: {(bakedAsset.EnableShadowOcclusion ? "On" : "Off")} | Static Occluders Only: {(bakedAsset.StaticOccludersOnly ? "On" : "Off")} | Temp Mesh Colliders: {(bakedAsset.CreateTemporaryMeshColliders ? "On" : "Off")} | Soft Samples: {(bakedAsset.EnableSoftShadowSampling ? bakedAsset.SoftShadowSampleCount.ToString() : "Off")}", MessageType.None);
 
 				if (GUILayout.Button("Select Baked Data Asset"))

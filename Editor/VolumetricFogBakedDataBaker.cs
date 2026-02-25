@@ -25,6 +25,8 @@ internal static class VolumetricFogBakedDataBaker
 		public int softShadowSampleCount;
 		public float directionalSoftConeAngleRadians;
 		public float punctualSoftConeAngleRadians;
+		public int visibilitySupersampleCount;
+		public bool visibilityConservativeOcclusion;
 	}
 
 	private struct BakedLightSample
@@ -221,7 +223,7 @@ internal static class VolumetricFogBakedDataBaker
 		int resolutionX = Mathf.Clamp(bakedData.ResolutionX, 4, 256);
 		int resolutionY = Mathf.Clamp(bakedData.ResolutionY, 4, 256);
 		int resolutionZ = Mathf.Clamp(bakedData.ResolutionZ, 4, 256);
-		int visibilityResolutionMultiplier = Mathf.Clamp(bakedData.StaticVisibilityResolutionMultiplier, 1, 4);
+		int visibilityResolutionMultiplier = Mathf.Clamp(bakedData.StaticVisibilityResolutionMultiplier, 1, 8);
 		int visibilityResolutionX = Mathf.Clamp(resolutionX * visibilityResolutionMultiplier, 4, 512);
 		int visibilityResolutionY = Mathf.Clamp(resolutionY * visibilityResolutionMultiplier, 4, 512);
 		int visibilityResolutionZ = Mathf.Clamp(resolutionZ * visibilityResolutionMultiplier, 4, 512);
@@ -246,7 +248,9 @@ internal static class VolumetricFogBakedDataBaker
 			enableSoftShadowSampling = bakedData.EnableSoftShadowSampling,
 			softShadowSampleCount = Mathf.Clamp(bakedData.SoftShadowSampleCount, 1, 16),
 			directionalSoftConeAngleRadians = Mathf.Deg2Rad * Mathf.Max(0.0f, bakedData.DirectionalSoftShadowConeAngle),
-			punctualSoftConeAngleRadians = Mathf.Deg2Rad * Mathf.Max(0.0f, bakedData.PunctualSoftShadowConeAngle)
+			punctualSoftConeAngleRadians = Mathf.Deg2Rad * Mathf.Max(0.0f, bakedData.PunctualSoftShadowConeAngle),
+			visibilitySupersampleCount = Mathf.Clamp(bakedData.StaticVisibilitySupersampleCount, 1, 16),
+			visibilityConservativeOcclusion = bakedData.StaticVisibilityConservativeOcclusion
 		};
 		if (occlusionSettings.enabled && occlusionSettings.layerMask == 0)
 		{
@@ -430,6 +434,7 @@ internal static class VolumetricFogBakedDataBaker
 		float invResolutionX = 1.0f / resolutionX;
 		float invResolutionY = 1.0f / resolutionY;
 		float invResolutionZ = 1.0f / resolutionZ;
+		Vector3 voxelSize = new Vector3(boundsSize.x * invResolutionX, boundsSize.y * invResolutionY, boundsSize.z * invResolutionZ);
 		int xySliceCount = resolutionX * resolutionY;
 
 		using (TemporaryBakeColliderScope temporaryColliderScope = occlusionSettings.enabled && occlusionSettings.createTemporaryMeshColliders
@@ -469,7 +474,7 @@ internal static class VolumetricFogBakedDataBaker
 								float vx = (x + 0.5f) * invResolutionX;
 								float positionX = boundsMin.x + vx * boundsSize.x;
 								Vector3 positionWS = new Vector3(positionX, positionY, positionZ);
-								float visibility = Mathf.Clamp01(ComputeShadowVisibility(positionWS, light, occlusionSettings));
+								float visibility = Mathf.Clamp01(ComputeShadowVisibilitySupersampled(positionWS, light, occlusionSettings, voxelSize));
 								int sliceIndex = rowOffset + x;
 								sliceVisibility[sliceIndex] = new Color(visibility, 0.0f, 0.0f, 1.0f);
 							}
@@ -747,6 +752,53 @@ internal static class VolumetricFogBakedDataBaker
 		return spotAttenuation * spotAttenuation;
 	}
 
+	private static float ComputeShadowVisibilitySupersampled(Vector3 positionWS, in BakedLightSample light, in BakedOcclusionSettings settings, in Vector3 voxelSize)
+	{
+		int sampleCount = Mathf.Clamp(settings.visibilitySupersampleCount, 1, 16);
+		if (sampleCount <= 1)
+			return ComputeShadowVisibility(positionWS, light, settings);
+
+		float halfX = Mathf.Max(0.0001f, voxelSize.x * 0.45f);
+		float halfY = Mathf.Max(0.0001f, voxelSize.y * 0.45f);
+		float halfZ = Mathf.Max(0.0001f, voxelSize.z * 0.45f);
+		float minVisibility = 1.0f;
+		float visibilitySum = 0.0f;
+
+		for (int sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
+		{
+			Vector3 sampleOffset = sampleIndex == 0
+				? Vector3.zero
+				: new Vector3(
+					(Mathf.Clamp01(Halton(sampleIndex, 2)) * 2.0f - 1.0f) * halfX,
+					(Mathf.Clamp01(Halton(sampleIndex, 3)) * 2.0f - 1.0f) * halfY,
+					(Mathf.Clamp01(Halton(sampleIndex, 5)) * 2.0f - 1.0f) * halfZ);
+
+			float sampleVisibility = ComputeShadowVisibility(positionWS + sampleOffset, light, settings);
+			minVisibility = Mathf.Min(minVisibility, sampleVisibility);
+			visibilitySum += sampleVisibility;
+		}
+
+		if (settings.visibilityConservativeOcclusion)
+			return minVisibility;
+
+		return visibilitySum / sampleCount;
+	}
+
+	private static float Halton(int index, int b)
+	{
+		float f = 1.0f;
+		float r = 0.0f;
+		int i = Mathf.Max(1, index);
+		while (i > 0)
+		{
+			f /= b;
+			r += f * (i % b);
+			i /= b;
+		}
+
+		return r;
+	}
+
 	private static float ComputeShadowVisibility(Vector3 positionWS, in BakedLightSample light, in BakedOcclusionSettings settings)
 	{
 		if (!settings.enabled || !light.castShadows)
@@ -754,21 +806,24 @@ internal static class VolumetricFogBakedDataBaker
 
 		Vector3 baseDirectionToLight;
 		float maxDistance;
+		float rayBias;
 
 		if (light.type == LightType.Directional)
 		{
 			baseDirectionToLight = -light.direction.normalized;
 			maxDistance = settings.directionalDistance;
+			rayBias = settings.rayBias;
 		}
 		else
 		{
 			Vector3 toLight = light.position - positionWS;
 			float distance = Mathf.Sqrt(Mathf.Max(Vector3.Dot(toLight, toLight), 0.000001f));
-			if (distance <= settings.rayBias)
+			rayBias = Mathf.Min(settings.rayBias, Mathf.Max(0.00005f, distance * 0.01f));
+			if (distance <= rayBias)
 				return 1.0f;
 
 			baseDirectionToLight = toLight / distance;
-			maxDistance = Mathf.Max(distance - settings.rayBias * 2.0f, 0.0f);
+			maxDistance = Mathf.Max(distance - rayBias, 0.0f);
 			if (maxDistance <= 0.0f)
 				return 1.0f;
 		}
@@ -792,7 +847,7 @@ internal static class VolumetricFogBakedDataBaker
 				? GetConeSampleDirection(baseDirectionToLight, sampleIndex, sampleCount, coneAngleRadians)
 				: baseDirectionToLight;
 
-			Vector3 rayOrigin = positionWS + sampleDirection * settings.rayBias;
+			Vector3 rayOrigin = positionWS + sampleDirection * rayBias;
 			bool occluded = RaycastOccluder(rayOrigin, sampleDirection, maxDistance, settings);
 			if (!occluded)
 				visibleSamples++;
