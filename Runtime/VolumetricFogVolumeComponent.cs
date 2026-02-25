@@ -18,6 +18,8 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 {
 	#region Public Attributes
 
+	private const int MaxVisibleAdditionalLights = 256;
+
 	[Header("Distances")]
 	[Tooltip("The maximum distance from the camera that the fog will be rendered up to.")]
 	public ClampedFloatParameter distance = new ClampedFloatParameter(64.0f, 0.0f, 512.0f);
@@ -64,7 +66,7 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	[Tooltip("Raymarching steps. Greater values will increase the fog quality at the expense of performance.")]
 	public ClampedIntParameter maxSteps = new ClampedIntParameter(128, 8, 256);
 	[Tooltip("Maximum additional lights considered during fog raymarching. Lower values improve performance in scenes with many lights.")]
-	public ClampedIntParameter maxAdditionalLights = new ClampedIntParameter(32, 0, UniversalRenderPipeline.maxVisibleAdditionalLights);
+	public ClampedIntParameter maxAdditionalLights = new ClampedIntParameter(32, 0, MaxVisibleAdditionalLights);
 	[Tooltip("The number of times that the fog texture will be blurred. Higher values lead to softer volumetric god rays at the cost of some performance.")]
 	public ClampedIntParameter blurIterations = new ClampedIntParameter(2, 0, 4);
 	[Tooltip("When greater than zero, raymarching stops early once transmittance falls below this threshold. This improves performance in dense fog.")]

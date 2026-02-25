@@ -12,7 +12,8 @@ public sealed class VolumetricAdditionalLight : MonoBehaviour
 {
 	#region Private Attributes
 
-	private static readonly Dictionary<int, VolumetricAdditionalLight> ActiveLights = new Dictionary<int, VolumetricAdditionalLight>(UniversalRenderPipeline.maxVisibleAdditionalLights);
+	private const int MaxVisibleAdditionalLights = 256;
+	private static readonly Dictionary<int, VolumetricAdditionalLight> ActiveLights = new Dictionary<int, VolumetricAdditionalLight>(MaxVisibleAdditionalLights);
 
 	[Tooltip("Higher positive values will make the fog affected by this light to appear brighter when directly looking to it, while lower negative values will make the fog to appear brighter when looking away from it. The closer the value is closer to 1 or -1, the less the brightness will spread. Most times, positive values higher than 0 and lower than 1 should be used.")]
 	[Range(-1.0f, 1.0f)]

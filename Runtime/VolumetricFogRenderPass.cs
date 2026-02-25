@@ -88,11 +88,12 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int ScatteringsArrayId = Shader.PropertyToID("_Scatterings");
 	private static readonly int RadiiSqArrayId = Shader.PropertyToID("_RadiiSq");
 
-	private static int LightsParametersLength = UniversalRenderPipeline.maxVisibleAdditionalLights + 1;
+	private const int MaxVisibleAdditionalLights = 256;
+	private static int LightsParametersLength = MaxVisibleAdditionalLights + 1;
 
 	private static readonly float[] Anisotropies = new float[LightsParametersLength];
 	private static readonly float[] Scatterings = new float[LightsParametersLength];
-	private static readonly float[] RadiiSq = new float[UniversalRenderPipeline.maxVisibleAdditionalLights];
+	private static readonly float[] RadiiSq = new float[MaxVisibleAdditionalLights];
 
 	private int downsampleDepthPassIndex;
 	private int volumetricFogRenderPassIndex;
@@ -394,7 +395,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		if (enableAdditionalLightsContribution && lastIndex >= 0)
 		{
-			int maxAdditionalLights = Mathf.Clamp(fogVolume.maxAdditionalLights.value, 0, UniversalRenderPipeline.maxVisibleAdditionalLights);
+			int maxAdditionalLights = Mathf.Clamp(fogVolume.maxAdditionalLights.value, 0, MaxVisibleAdditionalLights);
 			int maxAdditionalLightsToProcess = Mathf.Min(additionalLightsCount, maxAdditionalLights);
 
 			for (int i = 0; i <= lastIndex && effectiveAdditionalLightsCount < maxAdditionalLightsToProcess; ++i)
