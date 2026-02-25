@@ -7,6 +7,14 @@ using UnityEngine;
 /// </summary>
 internal static class VolumetricFogBakedDataBaker
 {
+	private struct BakedOcclusionSettings
+	{
+		public bool enabled;
+		public int layerMask;
+		public float rayBias;
+		public float directionalDistance;
+	}
+
 	private struct BakedLightSample
 	{
 		public LightType type;
@@ -19,6 +27,7 @@ internal static class VolumetricFogBakedDataBaker
 		public float scattering;
 		public float spotScale;
 		public float spotOffset;
+		public bool castShadows;
 	}
 
 	/// <summary>
@@ -94,6 +103,8 @@ internal static class VolumetricFogBakedDataBaker
 			Debug.LogWarning("Volumetric fog bake found no lights configured as Baked that contribute to fog. Check each Light Mode and bake volume bounds. A black baked texture will be generated.", fogVolume);
 		else if (defaultAdditionalScatteringLightsCount > 0)
 			Debug.LogWarning($"Volumetric fog bake used default scattering for {defaultAdditionalScatteringLightsCount} baked point/spot lights that are missing VolumetricAdditionalLight.", fogVolume);
+		if (bakedLightsCount > 0 && bakedData.EnableShadowOcclusion)
+			Debug.Log("Volumetric fog bake: collider-based occlusion is enabled. Baked lights with shadows will be blocked by colliders.", fogVolume);
 
 		int resolutionX = Mathf.Clamp(bakedData.ResolutionX, 4, 256);
 		int resolutionY = Mathf.Clamp(bakedData.ResolutionY, 4, 256);
@@ -107,6 +118,13 @@ internal static class VolumetricFogBakedDataBaker
 		float invResolutionY = 1.0f / resolutionY;
 		float invResolutionZ = 1.0f / resolutionZ;
 		int xyStride = resolutionX * resolutionY;
+		BakedOcclusionSettings occlusionSettings = new BakedOcclusionSettings
+		{
+			enabled = bakedData.EnableShadowOcclusion,
+			layerMask = bakedData.OccluderLayerMask,
+			rayBias = Mathf.Max(0.0f, bakedData.ShadowRayBias),
+			directionalDistance = Mathf.Max(1.0f, bakedData.DirectionalShadowDistance)
+		};
 
 		try
 		{
@@ -134,7 +152,7 @@ internal static class VolumetricFogBakedDataBaker
 						float positionX = boundsMin.x + vx * boundsSize.x;
 						Vector3 positionWS = new Vector3(positionX, positionY, positionZ);
 
-						Vector3 bakedColor = EvaluateBakedLightingAtPosition(positionWS, bakedLights);
+						Vector3 bakedColor = EvaluateBakedLightingAtPosition(positionWS, bakedLights, occlusionSettings);
 						bakedColors[rowOffset + x] = new Color(bakedColor.x, bakedColor.y, bakedColor.z, 1.0f);
 					}
 				}
@@ -258,7 +276,8 @@ internal static class VolumetricFogBakedDataBaker
 				invRangeSq = 0.0f,
 				radiusSq = 0.04f,
 				spotScale = 0.0f,
-				spotOffset = 0.0f
+				spotOffset = 0.0f,
+				castShadows = light.shadows != LightShadows.None
 			};
 
 			if (light.type == LightType.Point || light.type == LightType.Spot)
@@ -291,7 +310,7 @@ internal static class VolumetricFogBakedDataBaker
 		return bakedLights;
 	}
 
-	private static Vector3 EvaluateBakedLightingAtPosition(Vector3 positionWS, List<BakedLightSample> bakedLights)
+	private static Vector3 EvaluateBakedLightingAtPosition(Vector3 positionWS, List<BakedLightSample> bakedLights, in BakedOcclusionSettings occlusionSettings)
 	{
 		const float AveragePhase = 0.0795774715f; // 1 / (4 * PI), view-independent phase approximation.
 		Vector3 accumulatedColor = Vector3.zero;
@@ -302,6 +321,9 @@ internal static class VolumetricFogBakedDataBaker
 
 			if (light.type == LightType.Directional)
 			{
+				if (IsOccluded(positionWS, light, occlusionSettings))
+					continue;
+
 				accumulatedColor += light.color * (light.scattering * AveragePhase);
 				continue;
 			}
@@ -309,6 +331,9 @@ internal static class VolumetricFogBakedDataBaker
 			Vector3 toPoint = positionWS - light.position;
 			float distanceSq = Vector3.Dot(toPoint, toPoint);
 			if (distanceSq >= light.rangeSq)
+				continue;
+
+			if (IsOccluded(positionWS, light, occlusionSettings))
 				continue;
 
 			// Approximate URP distance attenuation to avoid broad over-bright baked punctual contribution.
@@ -338,6 +363,33 @@ internal static class VolumetricFogBakedDataBaker
 		}
 
 		return accumulatedColor;
+	}
+
+	private static bool IsOccluded(Vector3 positionWS, in BakedLightSample light, in BakedOcclusionSettings settings)
+	{
+		if (!settings.enabled || !light.castShadows)
+			return false;
+
+		if (light.type == LightType.Directional)
+		{
+			Vector3 directionToLight = -light.direction.normalized;
+			float maxDistance = settings.directionalDistance;
+			Vector3 origin = positionWS + directionToLight * settings.rayBias;
+			return Physics.Raycast(origin, directionToLight, maxDistance, settings.layerMask, QueryTriggerInteraction.Ignore);
+		}
+
+		Vector3 toSample = positionWS - light.position;
+		float distance = Mathf.Sqrt(Mathf.Max(Vector3.Dot(toSample, toSample), 0.000001f));
+		if (distance <= settings.rayBias)
+			return false;
+
+		Vector3 direction = toSample / distance;
+		Vector3 rayOrigin = light.position + direction * settings.rayBias;
+		float rayDistance = Mathf.Max(distance - settings.rayBias * 2.0f, 0.0f);
+		if (rayDistance <= 0.0f)
+			return false;
+
+		return Physics.Raycast(rayOrigin, direction, rayDistance, settings.layerMask, QueryTriggerInteraction.Ignore);
 	}
 
 	private static bool IsLightConfiguredAsBaked(Light light)

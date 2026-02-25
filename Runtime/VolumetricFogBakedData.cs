@@ -22,6 +22,14 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	[SerializeField, Min(4)] private int resolutionZ = 64;
 	[Tooltip("Number of baked lights captured in the current baked texture.")]
 	[SerializeField, Min(0)] private int bakedLightsCount = 0;
+	[Tooltip("When enabled, baking tests visibility against scene colliders so baked volumetric lighting can be blocked by geometry.")]
+	[SerializeField] private bool enableShadowOcclusion = true;
+	[Tooltip("Layer mask used to test baked shadow occlusion against colliders.")]
+	[SerializeField] private LayerMask occluderLayerMask = ~0;
+	[Tooltip("Bias used on baked shadow rays to avoid immediate self-hits.")]
+	[SerializeField, Min(0.0f)] private float shadowRayBias = 0.02f;
+	[Tooltip("Maximum ray distance for directional baked shadow occlusion.")]
+	[SerializeField, Min(1.0f)] private float directionalShadowDistance = 500.0f;
 
 	#endregion
 
@@ -35,12 +43,16 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	public int ResolutionZ => resolutionZ;
 	public Vector3Int Resolution => new Vector3Int(resolutionX, resolutionY, resolutionZ);
 	public int BakedLightsCount => bakedLightsCount;
+	public bool EnableShadowOcclusion => enableShadowOcclusion;
+	public int OccluderLayerMask => occluderLayerMask.value;
+	public float ShadowRayBias => shadowRayBias;
+	public float DirectionalShadowDistance => directionalShadowDistance;
 
 	public bool IsValid
 	{
 		get
 		{
-			return lightingTexture != null && boundsSize.x > 0.0001f && boundsSize.y > 0.0001f && boundsSize.z > 0.0001f && resolutionX >= 4 && resolutionY >= 4 && resolutionZ >= 4;
+			return lightingTexture != null && lightingTexture.depth > 1 && boundsSize.x > 0.0001f && boundsSize.y > 0.0001f && boundsSize.z > 0.0001f && resolutionX >= 4 && resolutionY >= 4 && resolutionZ >= 4;
 		}
 	}
 
@@ -71,6 +83,8 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 		resolutionY = Mathf.Clamp(resolutionY, 4, 256);
 		resolutionZ = Mathf.Clamp(resolutionZ, 4, 256);
 		bakedLightsCount = Mathf.Max(0, bakedLightsCount);
+		shadowRayBias = Mathf.Max(0.0f, shadowRayBias);
+		directionalShadowDistance = Mathf.Max(1.0f, directionalShadowDistance);
 	}
 
 	#endregion
