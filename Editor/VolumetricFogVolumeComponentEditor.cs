@@ -1,3 +1,5 @@
+using System;
+using System.Reflection;
 using UnityEditor;
 using UnityEditor.Rendering;
 using UnityEngine;
@@ -144,7 +146,7 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 			PropertyField(staticVoxelUpdateMode);
 
 			if (GUILayout.Button("Rebuild Static Voxel Volume"))
-				VolumetricFogRenderPass.RequestStaticVoxelRebuild();
+				RequestStaticVoxelRebuild();
 		}
 #if UNITY_2023_1_OR_NEWER
 		bool enabledAPVContribution = enableAPVContribution.overrideState.boolValue && enableAPVContribution.value.boolValue;
@@ -171,6 +173,16 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		PropertyField(enabled);
 		
 		PropertyField(renderPassEvent);
+	}
+
+	private static void RequestStaticVoxelRebuild()
+	{
+		Type renderPassType = Type.GetType("VolumetricFogRenderPass, com.cqf.urpvolumetricfog.runtime");
+		if (renderPassType == null)
+			return;
+
+		MethodInfo requestMethod = renderPassType.GetMethod("RequestStaticVoxelRebuild", BindingFlags.Public | BindingFlags.Static);
+		requestMethod?.Invoke(null, null);
 	}
 
 	#endregion
