@@ -138,7 +138,10 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		PropertyField(enableStaticLightsBake);
 		bool staticLightsBakeEnabled = enableStaticLightsBake.overrideState.boolValue && enableStaticLightsBake.value.boolValue;
 		if (staticLightsBakeEnabled)
+		{
 			PropertyField(staticLightsBakeRevision);
+			EditorGUILayout.HelpBox("Static lights bake uses only static lights and keeps old baked lighting until you increase Bake Revision.", MessageType.Info);
+		}
 
 		PropertyField(enabled);
 		

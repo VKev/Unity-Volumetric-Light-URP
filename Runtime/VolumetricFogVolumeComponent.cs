@@ -72,7 +72,7 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	[Tooltip("When greater than zero, raymarching stops early once transmittance falls below this threshold. This improves performance in dense fog.")]
 	public ClampedFloatParameter transmittanceThreshold = new ClampedFloatParameter(0.0f, 0.0f, 1.0f);
 	[Header("Static Light Bake")]
-	[Tooltip("When enabled, additional light volumetric data is baked and reused to reduce CPU work. Use this only when lights and static scene content do not change.")]
+	[Tooltip("When enabled, static lights are baked and reused to reduce CPU work. Moved lights will keep their baked result until rebake, and baked lighting does not use live shadow updates.")]
 	public BoolParameter enableStaticLightsBake = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
 	[Tooltip("Increase this value to force a new bake snapshot. Light and static scene changes do not auto-rebake.")]
 	public MinIntParameter staticLightsBakeRevision = new MinIntParameter(0, 0);
