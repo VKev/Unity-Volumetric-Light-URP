@@ -82,6 +82,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int VolumetricFogTextureId = Shader.PropertyToID("_VolumetricFogTexture");
 	private static readonly int SceneViewMainCameraFrustumMaskEnabledId = Shader.PropertyToID("_SceneViewMainCameraFrustumMaskEnabled");
 	private static readonly int MainCameraFrustumPlanesId = Shader.PropertyToID("_MainCameraFrustumPlanes");
+	private static readonly int DebugColorId = Shader.PropertyToID("_Color");
+	private static readonly int DebugBaseColorId = Shader.PropertyToID("_BaseColor");
 
 	private static readonly int FrameCountId = Shader.PropertyToID("_FrameCount");
 	private static readonly int CustomAdditionalLightsCountId = Shader.PropertyToID("_CustomAdditionalLightsCount");
@@ -157,7 +159,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static bool debugDrawOnlyOccupiedFroxels = true;
 	private static int debugMaxFroxelsToDraw = 256;
 	private static bool debugDrawWorldSpaceCubes = true;
+	private static float debugWorldSpaceCubeFillOpacity = 0.08f;
 	private static Color debugFroxelColor = new Color(0.0f, 1.0f, 1.0f, 1.0f);
+	private static Material debugSolidCubeMaterial;
+	private static Mesh debugUnitCubeMesh;
+	private static MaterialPropertyBlock debugSolidCubePropertyBlock;
 
 	private static bool isMaterialStateInitialized;
 	private static bool cachedMainLightContributionEnabled;
@@ -248,13 +254,15 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="drawOnlyOccupiedFroxels"></param>
 	/// <param name="maxFroxelsToDraw"></param>
 	/// <param name="drawWorldSpaceCubes"></param>
+	/// <param name="worldSpaceCubeFillOpacity"></param>
 	/// <param name="froxelColor"></param>
-	public void SetupFroxelDebugDrawing(bool enableDebugDrawing, bool drawOnlyOccupiedFroxels, int maxFroxelsToDraw, bool drawWorldSpaceCubes, Color froxelColor)
+	public void SetupFroxelDebugDrawing(bool enableDebugDrawing, bool drawOnlyOccupiedFroxels, int maxFroxelsToDraw, bool drawWorldSpaceCubes, float worldSpaceCubeFillOpacity, Color froxelColor)
 	{
 		debugDrawFroxelClusters = enableDebugDrawing;
 		debugDrawOnlyOccupiedFroxels = drawOnlyOccupiedFroxels;
 		debugMaxFroxelsToDraw = Mathf.Max(1, maxFroxelsToDraw);
 		debugDrawWorldSpaceCubes = drawWorldSpaceCubes;
+		debugWorldSpaceCubeFillOpacity = Mathf.Clamp01(worldSpaceCubeFillOpacity);
 		debugFroxelColor = froxelColor;
 	}
 
@@ -1054,7 +1062,34 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		float cubeSize = Mathf.Max(0.001f, (width + height) * 0.5f);
 		float halfExtent = cubeSize * 0.45f;
 
+		DrawWorldSpaceSolidCube(center, halfExtent, color, camera);
 		DrawWorldSpaceWireCube(center, halfExtent, color);
+	}
+
+	/// <summary>
+	/// Draws a translucent world-space solid cube.
+	/// </summary>
+	/// <param name="center"></param>
+	/// <param name="halfExtent"></param>
+	/// <param name="color"></param>
+	/// <param name="camera"></param>
+	private static void DrawWorldSpaceSolidCube(Vector3 center, float halfExtent, Color color, Camera camera)
+	{
+		if (camera == null || debugWorldSpaceCubeFillOpacity <= 0.0f)
+			return;
+
+		if (!EnsureDebugSolidCubeResources())
+			return;
+
+		Color fillColor = color;
+		fillColor.a = Mathf.Clamp01(debugWorldSpaceCubeFillOpacity * Mathf.Max(debugFroxelColor.a, 0.0001f));
+
+		debugSolidCubePropertyBlock.SetColor(DebugColorId, fillColor);
+		debugSolidCubePropertyBlock.SetColor(DebugBaseColorId, fillColor);
+
+		Vector3 scale = Vector3.one * (halfExtent * 2.0f);
+		Matrix4x4 matrix = Matrix4x4.TRS(center, Quaternion.identity, scale);
+		Graphics.DrawMesh(debugUnitCubeMesh, matrix, debugSolidCubeMaterial, 0, camera, 0, debugSolidCubePropertyBlock, ShadowCastingMode.Off, false);
 	}
 
 	/// <summary>
@@ -1088,6 +1123,94 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		Debug.DrawLine(p100, p101, color, 0.0f, true);
 		Debug.DrawLine(p110, p111, color, 0.0f, true);
 		Debug.DrawLine(p010, p011, color, 0.0f, true);
+	}
+
+	/// <summary>
+	/// Ensures resources needed to draw translucent debug cubes are allocated.
+	/// </summary>
+	/// <returns></returns>
+	private static bool EnsureDebugSolidCubeResources()
+	{
+		if (debugSolidCubeMaterial == null)
+		{
+			Shader debugShader = Shader.Find("Hidden/Internal-Colored");
+			if (debugShader == null)
+				return false;
+
+			debugSolidCubeMaterial = new Material(debugShader);
+			debugSolidCubeMaterial.hideFlags = HideFlags.HideAndDontSave;
+			debugSolidCubeMaterial.SetInt("_SrcBlend", (int)BlendMode.SrcAlpha);
+			debugSolidCubeMaterial.SetInt("_DstBlend", (int)BlendMode.OneMinusSrcAlpha);
+			debugSolidCubeMaterial.SetInt("_Cull", (int)CullMode.Back);
+			debugSolidCubeMaterial.SetInt("_ZWrite", 0);
+			debugSolidCubeMaterial.SetInt("_ZTest", (int)CompareFunction.LessEqual);
+		}
+
+		if (debugUnitCubeMesh == null)
+			debugUnitCubeMesh = CreateUnitCubeMesh();
+
+		if (debugSolidCubePropertyBlock == null)
+			debugSolidCubePropertyBlock = new MaterialPropertyBlock();
+
+		return debugSolidCubeMaterial != null && debugUnitCubeMesh != null;
+	}
+
+	/// <summary>
+	/// Creates a unit cube mesh centered at world origin.
+	/// </summary>
+	/// <returns></returns>
+	private static Mesh CreateUnitCubeMesh()
+	{
+		Mesh mesh = new Mesh();
+		mesh.name = "VolumetricFogDebugUnitCube";
+
+		Vector3[] vertices =
+		{
+			new Vector3(-0.5f, -0.5f, -0.5f),
+			new Vector3(0.5f, -0.5f, -0.5f),
+			new Vector3(0.5f, 0.5f, -0.5f),
+			new Vector3(-0.5f, 0.5f, -0.5f),
+			new Vector3(-0.5f, -0.5f, 0.5f),
+			new Vector3(0.5f, -0.5f, 0.5f),
+			new Vector3(0.5f, 0.5f, 0.5f),
+			new Vector3(-0.5f, 0.5f, 0.5f)
+		};
+
+		int[] triangles =
+		{
+			0, 2, 1, 0, 3, 2,
+			4, 5, 6, 4, 6, 7,
+			0, 1, 5, 0, 5, 4,
+			2, 3, 7, 2, 7, 6,
+			0, 4, 7, 0, 7, 3,
+			1, 2, 6, 1, 6, 5
+		};
+
+		mesh.SetVertices(vertices);
+		mesh.SetTriangles(triangles, 0, true);
+		mesh.RecalculateBounds();
+		mesh.UploadMeshData(true);
+		return mesh;
+	}
+
+	/// <summary>
+	/// Releases debug draw resources.
+	/// </summary>
+	private static void ReleaseDebugSolidCubeResources()
+	{
+		CoreUtils.Destroy(debugSolidCubeMaterial);
+		debugSolidCubeMaterial = null;
+
+		if (debugUnitCubeMesh != null)
+		{
+			if (Application.isPlaying)
+				UnityEngine.Object.Destroy(debugUnitCubeMesh);
+			else
+				UnityEngine.Object.DestroyImmediate(debugUnitCubeMesh);
+		}
+
+		debugUnitCubeMesh = null;
+		debugSolidCubePropertyBlock = null;
 	}
 
 	/// <summary>
@@ -1469,6 +1592,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		volumetricFogRenderRTHandle?.Release();
 		volumetricFogBlurRTHandle?.Release();
 		volumetricFogUpsampleCompositionRTHandle?.Release();
+		ReleaseDebugSolidCubeResources();
 		ReleaseFroxelBuffers();
 		ResetMaterialStateCache();
 	}
