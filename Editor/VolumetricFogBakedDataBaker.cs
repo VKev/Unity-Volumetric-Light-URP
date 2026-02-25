@@ -90,7 +90,7 @@ internal static class VolumetricFogBakedDataBaker
 		List<BakedLightSample> bakedLights = CollectBakedLights(fogVolume, out int defaultAdditionalScatteringLightsCount);
 		bakedLightsCount = bakedLights.Count;
 		if (bakedLightsCount == 0)
-			Debug.LogWarning("Volumetric fog bake found no lights with Lightmap Bake Type = Baked that contribute to fog. Check light bake mode and fog contribution toggles. A black baked texture will be generated.", fogVolume);
+			Debug.LogWarning("Volumetric fog bake found no lights configured as Baked that contribute to fog. Check each Light Mode and bake volume bounds. A black baked texture will be generated.", fogVolume);
 		else if (defaultAdditionalScatteringLightsCount > 0)
 			Debug.LogWarning($"Volumetric fog bake used default scattering for {defaultAdditionalScatteringLightsCount} baked point/spot lights that are missing VolumetricAdditionalLight.", fogVolume);
 
@@ -179,6 +179,7 @@ internal static class VolumetricFogBakedDataBaker
 			texture.wrapMode = TextureWrapMode.Clamp;
 			texture.filterMode = FilterMode.Bilinear;
 			texture.anisoLevel = 0;
+			texture.hideFlags = HideFlags.HideInHierarchy;
 			AssetDatabase.AddObjectToAsset(texture, bakedData);
 		}
 		else
@@ -186,6 +187,7 @@ internal static class VolumetricFogBakedDataBaker
 			texture.wrapMode = TextureWrapMode.Clamp;
 			texture.filterMode = FilterMode.Bilinear;
 			texture.anisoLevel = 0;
+			texture.hideFlags = HideFlags.HideInHierarchy;
 		}
 
 		return texture;
@@ -205,8 +207,6 @@ internal static class VolumetricFogBakedDataBaker
 		Color tintLinear = fogVolume.tint.value.linear;
 		Vector3 mainLightTint = new Vector3(tintLinear.r, tintLinear.g, tintLinear.b);
 		float mainLightScattering = Mathf.Max(0.0f, fogVolume.scattering.value);
-		bool mainLightContributionEnabled = fogVolume.enableMainLightContribution.value && mainLightScattering > 0.0f;
-		bool additionalLightsContributionEnabled = fogVolume.enableAdditionalLightsContribution.value;
 
 		for (int i = 0; i < sceneLights.Length; ++i)
 		{
@@ -214,7 +214,7 @@ internal static class VolumetricFogBakedDataBaker
 			if (light == null || !light.enabled || !light.gameObject.activeInHierarchy)
 				continue;
 
-			if (light.bakingOutput.lightmapBakeType != LightmapBakeType.Baked)
+			if (!IsLightConfiguredAsBaked(light))
 				continue;
 
 			if (light.type != LightType.Directional && light.type != LightType.Point && light.type != LightType.Spot)
@@ -226,7 +226,7 @@ internal static class VolumetricFogBakedDataBaker
 			float scattering;
 			if (light.type == LightType.Directional)
 			{
-				if (!mainLightContributionEnabled)
+				if (mainLightScattering <= 0.0001f)
 					continue;
 
 				scattering = mainLightScattering;
@@ -234,16 +234,10 @@ internal static class VolumetricFogBakedDataBaker
 			}
 			else if (light.TryGetComponent(out VolumetricAdditionalLight volumetricAdditionalLight))
 			{
-				if (!additionalLightsContributionEnabled)
-					continue;
-
 				scattering = Mathf.Max(0.0f, volumetricAdditionalLight.Scattering);
 			}
 			else
 			{
-				if (!additionalLightsContributionEnabled)
-					continue;
-
 				// Allow baked contribution for point/spot lights without VolumetricAdditionalLight using a default scattering.
 				scattering = 1.0f;
 				defaultAdditionalScatteringLightsCount++;
@@ -321,6 +315,19 @@ internal static class VolumetricFogBakedDataBaker
 		}
 
 		return accumulatedColor;
+	}
+
+	private static bool IsLightConfiguredAsBaked(Light light)
+	{
+		if (light == null)
+			return false;
+
+		LightmapBakeType bakingOutputType = light.bakingOutput.lightmapBakeType;
+#pragma warning disable 0618
+		LightmapBakeType configuredType = light.lightmapBakeType;
+#pragma warning restore 0618
+
+		return bakingOutputType == LightmapBakeType.Baked || configuredType == LightmapBakeType.Baked;
 	}
 
 	private static bool TryCreateBakedDataAsset(out VolumetricFogBakedData bakedData)

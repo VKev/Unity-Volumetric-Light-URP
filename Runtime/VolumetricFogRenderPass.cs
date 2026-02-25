@@ -700,8 +700,24 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (light == null)
 			return true;
 
-		LightmapBakeType bakeType = light.bakingOutput.lightmapBakeType;
-		return bakeType != LightmapBakeType.Baked;
+		return !IsLightConfiguredAsBaked(light);
+	}
+
+	/// <summary>
+	/// Returns whether a light is configured as baked (using both configured and runtime output bake type).
+	/// </summary>
+	/// <param name="light"></param>
+	/// <returns></returns>
+	private static bool IsLightConfiguredAsBaked(Light light)
+	{
+		if (light == null)
+			return false;
+
+		LightmapBakeType bakingOutputType = light.bakingOutput.lightmapBakeType;
+#pragma warning disable 0618
+		LightmapBakeType configuredType = light.lightmapBakeType;
+#pragma warning restore 0618
+		return bakingOutputType == LightmapBakeType.Baked || configuredType == LightmapBakeType.Baked;
 	}
 
 	/// <summary>
@@ -792,7 +808,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (light == null || !light.enabled || !light.gameObject.activeInHierarchy)
 			return false;
 
-		if (classifyLightsByBakeType && light.bakingOutput.lightmapBakeType == LightmapBakeType.Baked)
+		if (classifyLightsByBakeType && IsLightConfiguredAsBaked(light))
 			return false;
 
 		// Volumetric additional lights are only expected to be point and spot lights.
