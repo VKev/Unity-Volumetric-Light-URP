@@ -391,7 +391,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		// For the time being, just assume that if additional lights contribution to fog is enabled, we are either using clustered rendering, or using forward or deferred with, at most, 257 visible lights.
 		int lastIndex = Mathf.Min(visibleLights.Length - 1, LightsParametersLength - 1);
 		int effectiveAdditionalLightsCount = 0;
-		bool hasAnyAdditionalContribution = false;
 
 		if (enableAdditionalLightsContribution && lastIndex >= 0)
 		{
@@ -407,23 +406,23 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 				float scattering = 0.0f;
 				float radius = 0.0f;
 
-				if (VolumetricAdditionalLight.TryGetFromLight(visibleLights[i].light, out VolumetricAdditionalLight volumetricLight))
+				Light light = visibleLights[i].light;
+				if (light != null && light.TryGetComponent(out VolumetricAdditionalLight volumetricLight))
 				{
-					anisotropy = volumetricLight.Anisotropy;
-					scattering = volumetricLight.Scattering;
-					radius = volumetricLight.Radius;
+					if (volumetricLight.gameObject.activeInHierarchy && volumetricLight.enabled)
+					{
+						anisotropy = volumetricLight.Anisotropy;
+						scattering = volumetricLight.Scattering;
+						radius = volumetricLight.Radius;
+					}
 				}
 
 				Anisotropies[effectiveAdditionalLightsCount] = anisotropy;
 				Scatterings[effectiveAdditionalLightsCount] = scattering;
 				RadiiSq[effectiveAdditionalLightsCount] = radius * radius;
-				hasAnyAdditionalContribution |= scattering > 0.0f;
 				effectiveAdditionalLightsCount++;
 			}
 		}
-
-		if (!hasAnyAdditionalContribution)
-			effectiveAdditionalLightsCount = 0;
 
 		if (enableMainLightContribution)
 		{
