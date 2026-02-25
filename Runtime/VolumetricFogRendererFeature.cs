@@ -39,6 +39,7 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 
 	private Material downsampleDepthMaterial;
 	private Material volumetricFogMaterial;
+	private Camera lastKnownMainCamera;
 
 	private VolumetricFogRenderPass volumetricFogRenderPass;
 
@@ -51,9 +52,7 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// </summary>
 	public override void Create()
 	{
-		ValidateResourcesForVolumetricFogRenderPass(true);
-
-		volumetricFogRenderPass = new VolumetricFogRenderPass(downsampleDepthMaterial, volumetricFogMaterial, VolumetricFogRenderPass.DefaultRenderPassEvent);
+		EnsureVolumetricFogRenderPassInitialized(true);
 	}
 
 	/// <summary>
@@ -63,14 +62,22 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// <param name="renderingData"></param>
 	public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
 	{
+		if (!EnsureVolumetricFogRenderPassInitialized(false))
+			return;
+
+		Camera mainCamera = Camera.main;
+		if (mainCamera != null)
+			lastKnownMainCamera = mainCamera;
+		Camera scenePreviewMainCamera = mainCamera != null ? mainCamera : lastKnownMainCamera;
+
 		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
-		bool shouldPreviewMainCameraRegionInSceneView = ShouldPreviewMainCameraRegionInSceneView(renderingData.cameraData);
+		bool shouldPreviewMainCameraRegionInSceneView = ShouldPreviewMainCameraRegionInSceneView(renderingData.cameraData, scenePreviewMainCamera);
 		bool isPostProcessEnabled = renderingData.postProcessingEnabled && renderingData.cameraData.postProcessEnabled;
 		bool shouldAddVolumetricFogRenderPass = isPostProcessEnabled && ShouldAddVolumetricFogRenderPass(renderingData.cameraData, shouldPreviewMainCameraRegionInSceneView, fogVolume);
 		
 		if (shouldAddVolumetricFogRenderPass)
 		{
-			volumetricFogRenderPass.SetupSceneViewMainCameraMask(shouldPreviewMainCameraRegionInSceneView, Camera.main);
+			volumetricFogRenderPass.SetupSceneViewMainCameraMask(shouldPreviewMainCameraRegionInSceneView, scenePreviewMainCamera);
 			volumetricFogRenderPass.SetupFroxelDebugDrawing(debugDrawFroxelClusters, debugDrawOnlyOccupiedFroxels, debugMaxFroxelsToDraw, debugDrawWorldSpaceCubes, debugWorldSpaceCubeFillOpacity, debugFroxelColor);
 			volumetricFogRenderPass.renderPassEvent = GetRenderPassEvent(fogVolume);
 			volumetricFogRenderPass.ConfigureInput(ScriptableRenderPassInput.Depth);
@@ -87,6 +94,7 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 		base.Dispose(disposing);
 
 		volumetricFogRenderPass?.Dispose();
+		lastKnownMainCamera = null;
 
 		CoreUtils.Destroy(downsampleDepthMaterial);
 		CoreUtils.Destroy(volumetricFogMaterial);
@@ -95,6 +103,27 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	#endregion
 
 	#region Methods
+
+	/// <summary>
+	/// Ensures pass resources are valid and the render pass is constructed with the current materials.
+	/// </summary>
+	/// <param name="forceRefresh"></param>
+	/// <returns></returns>
+	private bool EnsureVolumetricFogRenderPassInitialized(bool forceRefresh)
+	{
+		bool resourcesOk = ValidateResourcesForVolumetricFogRenderPass(false);
+		bool shouldRecreatePass = forceRefresh || !resourcesOk || volumetricFogRenderPass == null;
+		if (shouldRecreatePass)
+		{
+			if (!ValidateResourcesForVolumetricFogRenderPass(true))
+				return false;
+
+			volumetricFogRenderPass?.Dispose();
+			volumetricFogRenderPass = new VolumetricFogRenderPass(downsampleDepthMaterial, volumetricFogMaterial, VolumetricFogRenderPass.DefaultRenderPassEvent);
+		}
+
+		return volumetricFogRenderPass != null;
+	}
 
 	/// <summary>
 	/// Validates the resources used by the volumetric fog render pass.
@@ -148,13 +177,14 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// Gets whether scene view should preview volumetric fog only in the main camera frustum.
 	/// </summary>
 	/// <param name="cameraData"></param>
+	/// <param name="mainCamera"></param>
 	/// <returns></returns>
-	private bool ShouldPreviewMainCameraRegionInSceneView(CameraData cameraData)
+	private bool ShouldPreviewMainCameraRegionInSceneView(CameraData cameraData, Camera mainCamera)
 	{
 		if (!renderMainCameraRegionInSceneView || cameraData.cameraType != CameraType.SceneView)
 			return false;
 
-		return Camera.main != null;
+		return mainCamera != null;
 	}
 
 	/// <summary>
