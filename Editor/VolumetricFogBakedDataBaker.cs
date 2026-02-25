@@ -296,7 +296,7 @@ internal static class VolumetricFogBakedDataBaker
 
 		Texture3D bakedLightingTexture = GetOrCreateBakedTextureAsset(bakedData, resolutionX, resolutionY, resolutionZ, isDirectionTexture: false);
 		Texture3D bakedDirectionTexture = GetOrCreateBakedTextureAsset(bakedData, resolutionX, resolutionY, resolutionZ, isDirectionTexture: true);
-		Texture3DArray bakedVisibilityTextureArray = GetOrCreateBakedVisibilityTextureArrayAsset(bakedData, resolutionX, resolutionY, resolutionZ, bakedLightsCount);
+		Texture2DArray bakedVisibilityTextureArray = GetOrCreateBakedVisibilityTextureArrayAsset(bakedData, resolutionX, resolutionY, resolutionZ, bakedLightsCount);
 		if (bakedLightingTexture == null || bakedDirectionTexture == null)
 			return false;
 
@@ -370,17 +370,17 @@ internal static class VolumetricFogBakedDataBaker
 		return texture;
 	}
 
-	private static Texture3DArray GetOrCreateBakedVisibilityTextureArrayAsset(VolumetricFogBakedData bakedData, int resolutionX, int resolutionY, int resolutionZ, int lightCount)
+	private static Texture2DArray GetOrCreateBakedVisibilityTextureArrayAsset(VolumetricFogBakedData bakedData, int resolutionX, int resolutionY, int resolutionZ, int lightCount)
 	{
-		Texture3DArray textureArray = bakedData.StaticVisibilityTextureArray;
+		Texture2DArray textureArray = bakedData.StaticVisibilityTextureArray;
 		if (lightCount <= 0)
 			return null;
 
+		int layerCount = Mathf.Max(1, resolutionZ) * lightCount;
 		bool needsCreate = textureArray == null
 			|| textureArray.width != resolutionX
 			|| textureArray.height != resolutionY
-			|| textureArray.depth != resolutionZ
-			|| textureArray.volumeDepth != lightCount
+			|| textureArray.depth != layerCount
 			|| textureArray.format != TextureFormat.RGBAHalf;
 
 		if (needsCreate)
@@ -388,7 +388,7 @@ internal static class VolumetricFogBakedDataBaker
 			if (textureArray != null)
 				UnityEngine.Object.DestroyImmediate(textureArray, true);
 
-			textureArray = new Texture3DArray(resolutionX, resolutionY, resolutionZ, lightCount, TextureFormat.RGBAHalf, false, true);
+			textureArray = new Texture2DArray(resolutionX, resolutionY, layerCount, TextureFormat.RGBAHalf, false, true);
 			textureArray.name = "VolumetricFogBakedVisibility";
 			textureArray.wrapMode = TextureWrapMode.Clamp;
 			textureArray.filterMode = FilterMode.Bilinear;
@@ -407,7 +407,7 @@ internal static class VolumetricFogBakedDataBaker
 		return textureArray;
 	}
 
-	private static bool BakeStaticVisibilityTextureArray(Texture3DArray visibilityTextureArray, List<BakedLightSample> bakedLights, in BakedOcclusionSettings occlusionSettings, Vector3 boundsMin, Vector3 boundsSize, int resolutionX, int resolutionY, int resolutionZ, VolumetricFogVolumeComponent fogVolume)
+	private static bool BakeStaticVisibilityTextureArray(Texture2DArray visibilityTextureArray, List<BakedLightSample> bakedLights, in BakedOcclusionSettings occlusionSettings, Vector3 boundsMin, Vector3 boundsSize, int resolutionX, int resolutionY, int resolutionZ, VolumetricFogVolumeComponent fogVolume)
 	{
 		if (visibilityTextureArray == null || bakedLights == null || bakedLights.Count == 0)
 			return true;
@@ -415,8 +415,7 @@ internal static class VolumetricFogBakedDataBaker
 		float invResolutionX = 1.0f / resolutionX;
 		float invResolutionY = 1.0f / resolutionY;
 		float invResolutionZ = 1.0f / resolutionZ;
-		int voxelCount = resolutionX * resolutionY * resolutionZ;
-		int xyStride = resolutionX * resolutionY;
+		int xySliceCount = resolutionX * resolutionY;
 
 		using (TemporaryBakeColliderScope temporaryColliderScope = occlusionSettings.enabled && occlusionSettings.createTemporaryMeshColliders
 			? TemporaryBakeColliderScope.Create(occlusionSettings.layerMask, occlusionSettings.staticOccludersOnly)
@@ -430,10 +429,10 @@ internal static class VolumetricFogBakedDataBaker
 				for (int lightIndex = 0; lightIndex < bakedLights.Count; ++lightIndex)
 				{
 					BakedLightSample light = bakedLights[lightIndex];
-					Color[] visibilityColors = new Color[voxelCount];
 
 					for (int z = 0; z < resolutionZ; ++z)
 					{
+						Color[] sliceVisibility = new Color[xySliceCount];
 						float globalProgress = ((lightIndex * resolutionZ) + z) / (float)Mathf.Max(1, bakedLights.Count * resolutionZ - 1);
 						if (EditorUtility.DisplayCancelableProgressBar("Volumetric Fog Bake", $"Baking static shadow visibility ({lightIndex + 1}/{bakedLights.Count})...", globalProgress))
 						{
@@ -448,7 +447,7 @@ internal static class VolumetricFogBakedDataBaker
 						{
 							float vy = (y + 0.5f) * invResolutionY;
 							float positionY = boundsMin.y + vy * boundsSize.y;
-							int rowOffset = y * resolutionX + z * xyStride;
+							int rowOffset = y * resolutionX;
 
 							for (int x = 0; x < resolutionX; ++x)
 							{
@@ -456,13 +455,14 @@ internal static class VolumetricFogBakedDataBaker
 								float positionX = boundsMin.x + vx * boundsSize.x;
 								Vector3 positionWS = new Vector3(positionX, positionY, positionZ);
 								float visibility = Mathf.Clamp01(ComputeShadowVisibility(positionWS, light, occlusionSettings));
-								int voxelIndex = rowOffset + x;
-								visibilityColors[voxelIndex] = new Color(visibility, 0.0f, 0.0f, 1.0f);
+								int sliceIndex = rowOffset + x;
+								sliceVisibility[sliceIndex] = new Color(visibility, 0.0f, 0.0f, 1.0f);
 							}
 						}
-					}
 
-					visibilityTextureArray.SetPixels(visibilityColors, lightIndex, 0);
+						int arrayLayer = lightIndex * resolutionZ + z;
+						visibilityTextureArray.SetPixels(sliceVisibility, arrayLayer, 0);
+					}
 				}
 			}
 			finally

@@ -35,12 +35,13 @@ float4 _BakedVolumetricFogBoundsMin;
 float4 _BakedVolumetricFogBoundsSizeInv;
 float _BakedVolumetricFogIntensity;
 int _BakedStaticLightsCount;
+float4 _BakedStaticVisibilityTexParams; // x: slices per light (resolutionZ)
 
 TEXTURE3D(_BakedVolumetricFogLightingTex);
 SAMPLER(sampler_BakedVolumetricFogLightingTex);
 TEXTURE3D(_BakedVolumetricFogDirectionTex);
 SAMPLER(sampler_BakedVolumetricFogDirectionTex);
-TEXTURE3D_ARRAY(_BakedStaticVisibilityTexArray);
+TEXTURE2D_ARRAY(_BakedStaticVisibilityTexArray);
 SAMPLER(sampler_BakedStaticVisibilityTexArray);
 
 float4 _BakedStaticLightColors[MAX_BAKED_STATIC_LIGHTS];
@@ -207,7 +208,15 @@ float3 GetStepBakedStaticLightsColor(float3 currPosWS, float3 rd, float density)
             attenuation *= radialFade;
         }
 
-        float visibility = SAMPLE_TEXTURE3D_ARRAY(_BakedStaticVisibilityTexArray, sampler_BakedStaticVisibilityTexArray, float4(bakedUv, i)).r;
+        float slicesPerLight = max(_BakedStaticVisibilityTexParams.x, 1.0);
+        float zCoord = bakedUv.z * (slicesPerLight - 1.0);
+        float z0 = floor(zCoord);
+        float z1 = min(z0 + 1.0, slicesPerLight - 1.0);
+        float zLerp = zCoord - z0;
+        float layerBase = i * slicesPerLight;
+        float visibility0 = SAMPLE_TEXTURE2D_ARRAY(_BakedStaticVisibilityTexArray, sampler_BakedStaticVisibilityTexArray, bakedUv.xy, layerBase + z0).r;
+        float visibility1 = SAMPLE_TEXTURE2D_ARRAY(_BakedStaticVisibilityTexArray, sampler_BakedStaticVisibilityTexArray, bakedUv.xy, layerBase + z1).r;
+        float visibility = lerp(visibility0, visibility1, zLerp);
         attenuation *= visibility;
         UNITY_BRANCH
         if (attenuation <= 0.000001)

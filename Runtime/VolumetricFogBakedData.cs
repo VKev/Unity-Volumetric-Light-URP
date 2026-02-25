@@ -45,8 +45,8 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 	[SerializeField] private Texture3D lightingTexture;
 	[Tooltip("3D texture containing baked dominant lighting direction in RGB.")]
 	[SerializeField] private Texture3D directionTexture;
-	[Tooltip("3D array storing precomputed shadow visibility per baked static light (one volume slice per light).")]
-	[SerializeField] private Texture3DArray staticVisibilityTextureArray;
+	[Tooltip("2D array storing precomputed shadow visibility per baked static light packed as Z-slices (light * resolutionZ layers).")]
+	[SerializeField] private Texture2DArray staticVisibilityTextureArray;
 	[Tooltip("Serialized static baked light parameters used at runtime with the precomputed visibility volume.")]
 	[SerializeField] private VolumetricFogBakedStaticLightData[] staticLights = Array.Empty<VolumetricFogBakedStaticLightData>();
 	[Tooltip("World-space center of the baked volume bounds.")]
@@ -88,7 +88,7 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 
 	public Texture3D LightingTexture => lightingTexture;
 	public Texture3D DirectionTexture => directionTexture;
-	public Texture3DArray StaticVisibilityTextureArray => staticVisibilityTextureArray;
+	public Texture2DArray StaticVisibilityTextureArray => staticVisibilityTextureArray;
 	public VolumetricFogBakedStaticLightData[] StaticLights => staticLights;
 	public int StaticLightsCount => staticLights != null ? staticLights.Length : 0;
 	public Vector3 BoundsCenter => boundsCenter;
@@ -116,7 +116,7 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 			return staticVisibilityTextureArray != null
 				&& staticLights != null
 				&& staticLights.Length > 0
-				&& staticVisibilityTextureArray.volumeDepth >= staticLights.Length;
+				&& staticVisibilityTextureArray.depth >= staticLights.Length * Mathf.Max(1, resolutionZ);
 		}
 	}
 
@@ -150,7 +150,7 @@ public sealed class VolumetricFogBakedData : ScriptableObject
 		directionTexture = texture;
 	}
 
-	public void SetStaticVisibilityTextureArray(Texture3DArray textureArray)
+	public void SetStaticVisibilityTextureArray(Texture2DArray textureArray)
 	{
 		staticVisibilityTextureArray = textureArray;
 	}
