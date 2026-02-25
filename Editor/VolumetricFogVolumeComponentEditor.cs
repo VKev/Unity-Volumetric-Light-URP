@@ -1,5 +1,6 @@
 using UnityEditor;
 using UnityEditor.Rendering;
+using UnityEngine;
 
 /// <summary>
 /// Custom editor for the volumetric fog volume component.
@@ -18,6 +19,9 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 	private SerializedDataParameter density;
 	private SerializedDataParameter attenuationDistance;
+	private SerializedDataParameter lightingMode;
+	private SerializedDataParameter bakedData;
+	private SerializedDataParameter bakedIntensity;
 #if UNITY_2023_1_OR_NEWER
 	private SerializedDataParameter enableAPVContribution;
 	private SerializedDataParameter APVContributionWeight;
@@ -59,6 +63,9 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 		density = Unpack(pf.Find(x => x.density));
 		attenuationDistance = Unpack(pf.Find(x => x.attenuationDistance));
+		lightingMode = Unpack(pf.Find(x => x.lightingMode));
+		bakedData = Unpack(pf.Find(x => x.bakedData));
+		bakedIntensity = Unpack(pf.Find(x => x.bakedIntensity));
 #if UNITY_2023_1_OR_NEWER
 		enableAPVContribution = Unpack(pf.Find(x => x.enableAPVContribution));
 		APVContributionWeight = Unpack(pf.Find(x => x.APVContributionWeight));
@@ -108,6 +115,47 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 		PropertyField(density);
 		PropertyField(attenuationDistance);
+		PropertyField(lightingMode);
+		VolumetricFogLightingMode currentLightingMode = (VolumetricFogLightingMode)lightingMode.value.intValue;
+		bool useHybridBaked = currentLightingMode == VolumetricFogLightingMode.HybridBaked;
+		if (useHybridBaked)
+		{
+			PropertyField(bakedData);
+			PropertyField(bakedIntensity);
+		}
+
+		VolumetricFogVolumeComponent fogVolume = target as VolumetricFogVolumeComponent;
+		if (fogVolume != null)
+		{
+			if (fogVolume.bakedData.value == null)
+				EditorGUILayout.HelpBox("Bake uses only lights with Lightmap Bake Type = Baked. A baked data asset will be created if missing.", MessageType.Info);
+			else
+			{
+				VolumetricFogBakedData bakedAsset = fogVolume.bakedData.value;
+				EditorGUILayout.HelpBox($"Baked Data Resolution: {bakedAsset.ResolutionX} x {bakedAsset.ResolutionY} x {bakedAsset.ResolutionZ}", MessageType.Info);
+			}
+
+			using (new EditorGUILayout.HorizontalScope())
+			{
+				if (GUILayout.Button("Bake Baked Lights"))
+				{
+					serializedObject.ApplyModifiedProperties();
+					VolumetricFogBakedDataBaker.BakeFromVolume(fogVolume);
+					serializedObject.Update();
+				}
+
+				using (new EditorGUI.DisabledScope(fogVolume.bakedData.value == null))
+				{
+					if (GUILayout.Button("Clear Baked Texture"))
+					{
+						serializedObject.ApplyModifiedProperties();
+						VolumetricFogBakedDataBaker.ClearBakedTexture(fogVolume);
+						serializedObject.Update();
+					}
+				}
+			}
+		}
+
 #if UNITY_2023_1_OR_NEWER
 		bool enabledAPVContribution = enableAPVContribution.overrideState.boolValue && enableAPVContribution.value.boolValue;
 		PropertyField(enableAPVContribution);

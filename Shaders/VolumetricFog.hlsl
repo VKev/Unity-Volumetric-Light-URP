@@ -29,6 +29,12 @@ float _APVContributionWeight;
 float _TransmittanceThreshold;
 float3 _Tint;
 int _MaxSteps;
+float4 _BakedVolumetricFogBoundsMin;
+float4 _BakedVolumetricFogBoundsSizeInv;
+float _BakedVolumetricFogIntensity;
+
+TEXTURE3D(_BakedVolumetricFogLightingTex);
+SAMPLER(sampler_BakedVolumetricFogLightingTex);
 
 float _Anisotropies[MAX_VISIBLE_LIGHTS + 1];
 float _Scatterings[MAX_VISIBLE_LIGHTS + 1];
@@ -129,6 +135,22 @@ float3 GetStepAdaptiveProbeVolumeEvaluation(float2 uv, float3 posWS, float densi
 #endif
  
     return (float3)apvDiffuseGI;
+}
+
+// Gets the baked volumetric lighting evaluation at one raymarch step.
+float3 GetStepBakedLightingColor(float3 currPosWS, float density)
+{
+#if _BAKED_VOLUMETRIC_FOG_ENABLED
+    float3 bakedUv = (currPosWS - _BakedVolumetricFogBoundsMin.xyz) * _BakedVolumetricFogBoundsSizeInv.xyz;
+    UNITY_BRANCH
+    if (any(bakedUv < 0.0) || any(bakedUv > 1.0))
+        return float3(0.0, 0.0, 0.0);
+
+    float3 bakedColor = SAMPLE_TEXTURE3D(_BakedVolumetricFogLightingTex, sampler_BakedVolumetricFogLightingTex, bakedUv).rgb;
+    return bakedColor * (_BakedVolumetricFogIntensity * density);
+#else
+    return float3(0.0, 0.0, 0.0);
+#endif
 }
 
 // Gets the main light color at one raymarch step.
@@ -303,11 +325,12 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         transmittance *= stepAttenuation;
 
         half3 apvColor = (half3)GetStepAdaptiveProbeVolumeEvaluation(uv, currPosWS, density);
+        half3 bakedColor = (half3)GetStepBakedLightingColor(currPosWS, density);
         half3 mainLightColor = (half3)GetStepMainLightColor(currPosWS, phaseMainLight, density);
         half3 additionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density);
         
         // TODO: Additional contributions? Reflection probes, etc...
-        half3 stepColor = apvColor + mainLightColor + additionalLightsColor;
+        half3 stepColor = apvColor + bakedColor + mainLightColor + additionalLightsColor;
         volumetricFogColor += ((float3)stepColor * (transmittance * stepLength));
 
         UNITY_BRANCH
