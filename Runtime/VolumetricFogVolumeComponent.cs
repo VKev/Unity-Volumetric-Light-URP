@@ -59,10 +59,16 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	public BoolParameter enableAdditionalLightsContribution = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
 
 	[Header("Performance & Quality")]
+	[Tooltip("Resolution at which volumetric fog is raymarched before upsampling. Quarter resolution is significantly faster but blurrier.")]
+	public VolumetricFogDownsampleModeParameter downsampleMode = new VolumetricFogDownsampleModeParameter(VolumetricFogDownsampleMode.Half);
 	[Tooltip("Raymarching steps. Greater values will increase the fog quality at the expense of performance.")]
 	public ClampedIntParameter maxSteps = new ClampedIntParameter(128, 8, 256);
+	[Tooltip("Maximum additional lights considered during fog raymarching. Lower values improve performance in scenes with many lights.")]
+	public ClampedIntParameter maxAdditionalLights = new ClampedIntParameter(32, 0, UniversalRenderPipeline.maxVisibleAdditionalLights);
 	[Tooltip("The number of times that the fog texture will be blurred. Higher values lead to softer volumetric god rays at the cost of some performance.")]
-	public ClampedIntParameter blurIterations = new ClampedIntParameter(2, 1, 4);
+	public ClampedIntParameter blurIterations = new ClampedIntParameter(2, 0, 4);
+	[Tooltip("When greater than zero, raymarching stops early once transmittance falls below this threshold. This improves performance in dense fog.")]
+	public ClampedFloatParameter transmittanceThreshold = new ClampedFloatParameter(0.0f, 0.0f, 1.0f);
 	[Tooltip("Disabling this will completely remove any feature from the volumetric fog from being rendered at all.")]
 	public BoolParameter enabled = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
 

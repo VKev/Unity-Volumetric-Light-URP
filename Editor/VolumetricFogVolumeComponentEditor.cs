@@ -30,8 +30,11 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 	private SerializedDataParameter enableAdditionalLightsContribution;
 
+	private SerializedDataParameter downsampleMode;
 	private SerializedDataParameter maxSteps;
+	private SerializedDataParameter maxAdditionalLights;
 	private SerializedDataParameter blurIterations;
+	private SerializedDataParameter transmittanceThreshold;
 	private SerializedDataParameter enabled;
 	
 	private SerializedDataParameter renderPassEvent;
@@ -68,8 +71,11 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 		enableAdditionalLightsContribution = Unpack(pf.Find(x => x.enableAdditionalLightsContribution));
 
+		downsampleMode = Unpack(pf.Find(x => x.downsampleMode));
 		maxSteps = Unpack(pf.Find(x => x.maxSteps));
+		maxAdditionalLights = Unpack(pf.Find(x => x.maxAdditionalLights));
 		blurIterations = Unpack(pf.Find(x => x.blurIterations));
+		transmittanceThreshold = Unpack(pf.Find(x => x.transmittanceThreshold));
 		enabled = Unpack(pf.Find(x => x.enabled));
 		
 		renderPassEvent = Unpack(pf.Find(x => x.renderPassEvent));
@@ -119,8 +125,11 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 		PropertyField(enableAdditionalLightsContribution);
 
+		PropertyField(downsampleMode);
 		PropertyField(maxSteps);
+		PropertyField(maxAdditionalLights);
 		PropertyField(blurIterations);
+		PropertyField(transmittanceThreshold);
 		PropertyField(enabled);
 		
 		PropertyField(renderPassEvent);

@@ -15,6 +15,10 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	[SerializeField] private Shader downsampleDepthShader;
 	[HideInInspector]
 	[SerializeField] private Shader volumetricFogShader;
+	[Tooltip("Render volumetric fog in Scene View cameras.")]
+	[SerializeField] private bool renderInSceneView;
+	[Tooltip("Render volumetric fog in overlay cameras from camera stacks.")]
+	[SerializeField] private bool renderInOverlayCameras;
 
 	private Material downsampleDepthMaterial;
 	private Material volumetricFogMaterial;
@@ -43,7 +47,7 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
 	{
 		bool isPostProcessEnabled = renderingData.postProcessingEnabled && renderingData.cameraData.postProcessEnabled;
-		bool shouldAddVolumetricFogRenderPass = isPostProcessEnabled && ShouldAddVolumetricFogRenderPass(renderingData.cameraData.cameraType);
+		bool shouldAddVolumetricFogRenderPass = isPostProcessEnabled && ShouldAddVolumetricFogRenderPass(renderingData.cameraData);
 		
 		if (shouldAddVolumetricFogRenderPass)
 		{
@@ -100,14 +104,19 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// <summary>
 	/// Gets whether the volumetric fog render pass should be enqueued to the renderer.
 	/// </summary>
-	/// <param name="cameraType"></param>
+	/// <param name="cameraData"></param>
 	/// <returns></returns>
-	private bool ShouldAddVolumetricFogRenderPass(CameraType cameraType)
+	private bool ShouldAddVolumetricFogRenderPass(CameraData cameraData)
 	{
 		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
+		CameraType cameraType = cameraData.cameraType;
+		bool isOverlayCamera = cameraData.renderType == CameraRenderType.Overlay;
+		bool isSceneViewCamera = cameraType == CameraType.SceneView;
 
 		bool isVolumeOk = fogVolume != null && fogVolume.IsActive();
 		bool isCameraOk = cameraType != CameraType.Preview && cameraType != CameraType.Reflection;
+		isCameraOk &= renderInSceneView || !isSceneViewCamera;
+		isCameraOk &= renderInOverlayCameras || !isOverlayCamera;
 		bool areResourcesOk = ValidateResourcesForVolumetricFogRenderPass(false);
 
 		return isActive && isVolumeOk && isCameraOk && areResourcesOk;

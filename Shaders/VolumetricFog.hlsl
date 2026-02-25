@@ -26,6 +26,7 @@ float _GroundHeight;
 float _Density;
 float _Absortion;
 float _APVContributionWeight;
+float _TransmittanceThreshold;
 float3 _Tint;
 int _MaxSteps;
 
@@ -199,8 +200,13 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
     CalculateRaymarchingParams(uv, ro, rd, iniOffsetToNearPlane, offsetLength, rdPhase);
 
     offsetLength -= iniOffsetToNearPlane;
+    float maxRaymarchDistance = min(offsetLength, _Distance - iniOffsetToNearPlane);
+    UNITY_BRANCH
+    if (maxRaymarchDistance <= 0.0)
+        return float4(0.0, 0.0, 0.0, 1.0);
+
     float3 roNearPlane = ro + rd * iniOffsetToNearPlane;
-    float stepLength = (_Distance - iniOffsetToNearPlane) / (float)_MaxSteps;
+    float stepLength = maxRaymarchDistance / (float)_MaxSteps;
     float jitter = stepLength * InterleavedGradientNoise(positionCS, _FrameCount);
 
     float phaseMainLight = GetMainLightPhase(rdPhase);
@@ -215,7 +221,7 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         float dist = jitter + i * stepLength;
         
         UNITY_BRANCH
-        if (dist >= offsetLength)
+        if (dist >= maxRaymarchDistance)
             break;
 
         // We are making the space between the camera position and the near plane "non existant", as if fog did not exist there.
@@ -239,9 +245,10 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         // TODO: Additional contributions? Reflection probes, etc...
         float3 stepColor = apvColor + mainLightColor + additionalLightsColor;
         volumetricFogColor += (stepColor * (transmittance * stepLength));
-        
-        // TODO: Break out when transmittance reaches low threshold and remap the transmittance when doing so.
-        // It does not make sense right now because the fog does not properly support transparency, so having dense fog leads to issues.
+
+        UNITY_BRANCH
+        if (_TransmittanceThreshold > 0.0 && transmittance <= _TransmittanceThreshold)
+            break;
     }
 
     return float4(volumetricFogColor, transmittance);

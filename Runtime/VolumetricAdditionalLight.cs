@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering.Universal;
 
@@ -11,6 +12,8 @@ public sealed class VolumetricAdditionalLight : MonoBehaviour
 {
 	#region Private Attributes
 
+	private static readonly Dictionary<int, VolumetricAdditionalLight> ActiveLights = new Dictionary<int, VolumetricAdditionalLight>(UniversalRenderPipeline.maxVisibleAdditionalLights);
+
 	[Tooltip("Higher positive values will make the fog affected by this light to appear brighter when directly looking to it, while lower negative values will make the fog to appear brighter when looking away from it. The closer the value is closer to 1 or -1, the less the brightness will spread. Most times, positive values higher than 0 and lower than 1 should be used.")]
 	[Range(-1.0f, 1.0f)]
 	[SerializeField] private float anisotropy = 0.25f;
@@ -20,6 +23,8 @@ public sealed class VolumetricAdditionalLight : MonoBehaviour
 	[Tooltip("Sets a falloff radius for this light. A higher value reduces noise towards the origin of the light.")]
 	[Range(0.0f, 1.0f)]
 	[SerializeField] private float radius = 0.2f;
+
+	private Light cachedLight;
 
 	#endregion
 
@@ -41,6 +46,69 @@ public sealed class VolumetricAdditionalLight : MonoBehaviour
 	{
 		get { return radius; }
 		set { radius = Mathf.Clamp01(value); }
+	}
+
+	#endregion
+
+	#region MonoBehaviour Methods
+
+	private void Awake()
+	{
+		CacheLight();
+	}
+
+	private void OnEnable()
+	{
+		Register();
+	}
+
+	private void OnDisable()
+	{
+		Unregister();
+	}
+
+	private void OnDestroy()
+	{
+		Unregister();
+	}
+
+	#endregion
+
+	#region Methods
+
+	internal static bool TryGetFromLight(Light light, out VolumetricAdditionalLight volumetricLight)
+	{
+		if (light != null && ActiveLights.TryGetValue(light.GetInstanceID(), out volumetricLight))
+			return volumetricLight != null && volumetricLight.isActiveAndEnabled;
+
+		volumetricLight = null;
+		return false;
+	}
+
+	private void CacheLight()
+	{
+		if (cachedLight == null)
+			TryGetComponent(out cachedLight);
+	}
+
+	private void Register()
+	{
+		CacheLight();
+
+		if (cachedLight == null)
+			return;
+
+		ActiveLights[cachedLight.GetInstanceID()] = this;
+	}
+
+	private void Unregister()
+	{
+		if (cachedLight == null)
+			return;
+
+		int lightInstanceId = cachedLight.GetInstanceID();
+		if (ActiveLights.TryGetValue(lightInstanceId, out VolumetricAdditionalLight registeredLight) && registeredLight == this)
+			ActiveLights.Remove(lightInstanceId);
 	}
 
 	#endregion
