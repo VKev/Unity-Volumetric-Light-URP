@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -5,7 +6,6 @@ using UnityEngine.Rendering.Universal;
 using Unity.Collections;
 
 #if UNITY_6000_0_OR_NEWER
-using System;
 using UnityEngine.Rendering.RenderGraphModule;
 #endif
 
@@ -15,6 +15,12 @@ using UnityEngine.Rendering.RenderGraphModule;
 public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 {
 	#region Definitions
+
+	private struct FroxelMeta
+	{
+		public int offset;
+		public int count;
+	}
 
 #if UNITY_6000_0_OR_NEWER
 
@@ -48,6 +54,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		public UniversalLightData lightData;
 		public VolumetricFogVolumeComponent fogVolume;
 		public Vector3 cameraPosition;
+		public Camera camera;
 		public int blurIterations;
 	}
 
@@ -88,6 +95,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int TintId = Shader.PropertyToID("_Tint");
 	private static readonly int MaxStepsId = Shader.PropertyToID("_MaxSteps");
 	private static readonly int TransmittanceThresholdId = Shader.PropertyToID("_TransmittanceThreshold");
+	private static readonly int FroxelGridDimensionsId = Shader.PropertyToID("_FroxelGridDimensions");
+	private static readonly int FroxelNearFarId = Shader.PropertyToID("_FroxelNearFar");
+	private static readonly int FroxelMetaBufferId = Shader.PropertyToID("_FroxelMetaBuffer");
+	private static readonly int FroxelLightIndicesBufferId = Shader.PropertyToID("_FroxelLightIndicesBuffer");
 
 	private static readonly int AnisotropiesArrayId = Shader.PropertyToID("_Anisotropies");
 	private static readonly int ScatteringsArrayId = Shader.PropertyToID("_Scatterings");
@@ -95,6 +106,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int AdditionalLightIndicesArrayId = Shader.PropertyToID("_AdditionalLightIndices");
 
 	private const int MaxVisibleAdditionalLights = 256;
+	private const int FroxelGridWidth = 16;
+	private const int FroxelGridHeight = 9;
+	private const int FroxelGridDepth = 24;
+	private const int FroxelMaxLightsPerCell = 24;
+	private const int FroxelCount = FroxelGridWidth * FroxelGridHeight * FroxelGridDepth;
 	private const float MinAdditionalLightScattering = 0.0001f;
 	private const float MinAdditionalLightIntensity = 0.001f;
 	private static int LightsParametersLength = MaxVisibleAdditionalLights + 1;
@@ -109,6 +125,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly float[] SelectedScatterings = new float[MaxVisibleAdditionalLights];
 	private static readonly float[] SelectedRadiiSq = new float[MaxVisibleAdditionalLights];
 	private static readonly float[] SelectedScores = new float[MaxVisibleAdditionalLights];
+	private static readonly Vector3[] SelectedLightPositions = new Vector3[MaxVisibleAdditionalLights];
+	private static readonly float[] SelectedLightRanges = new float[MaxVisibleAdditionalLights];
+	private static readonly FroxelMeta[] FroxelMetas = new FroxelMeta[FroxelCount];
+	private static readonly int[] FroxelLightIndices = new int[FroxelCount * FroxelMaxLightsPerCell];
+	private static readonly int[] FroxelCellLightCounts = new int[FroxelCount];
+
+	private static ComputeBuffer froxelMetaBuffer;
+	private static ComputeBuffer froxelLightIndicesBuffer;
 
 	private int downsampleDepthPassIndex;
 	private int volumetricFogRenderPassIndex;
@@ -132,12 +156,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static bool cachedMainLightContributionEnabled;
 	private static bool cachedAdditionalLightsContributionEnabled;
 	private static bool cachedSceneViewMainCameraFrustumMaskEnabled;
+	private static bool cachedFroxelClusteredLightsEnabled;
 #if UNITY_2023_1_OR_NEWER
 	private static bool cachedAPVContributionEnabled;
 #endif
 	private static int cachedAdditionalLightsCount;
 	private static int cachedLightsHash;
 	private static int cachedMainCameraFrustumPlanesHash;
+	private static int cachedFroxelHash;
 	private static float cachedDistance;
 	private static float cachedBaseHeight;
 	private static float cachedMaximumHeight;
@@ -270,7 +296,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		using (new ProfilingScope(cmd, profilingSampler))
 		{
-			UpdateVolumetricFogMaterialParameters(volumetricFogMaterial, fogVolume, cameraPosition, renderingData.lightData.mainLightIndex, renderingData.lightData.additionalLightsCount, renderingData.lightData.visibleLights);
+			UpdateVolumetricFogMaterialParameters(volumetricFogMaterial, fogVolume, renderingData.cameraData.camera, cameraPosition, renderingData.lightData.mainLightIndex, renderingData.lightData.additionalLightsCount, renderingData.lightData.visibleLights);
 			Blitter.BlitCameraTexture(cmd, volumetricFogRenderRTHandle, volumetricFogRenderRTHandle, volumetricFogMaterial, volumetricFogRenderPassIndex);
 
 			int blurIterations = fogVolume != null ? fogVolume.blurIterations.value : 0;
@@ -308,7 +334,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		UniversalLightData lightData = frameData.Get<UniversalLightData>();
 		UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
 		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
-		Vector3 cameraPosition = cameraData.camera != null ? cameraData.camera.transform.position : Vector3.zero;
+		Camera sceneCamera = cameraData.camera;
+		Vector3 cameraPosition = sceneCamera != null ? sceneCamera.transform.position : Vector3.zero;
 		ApplySceneViewMainCameraMaskParameters(volumetricFogMaterial);
 
 		CreateRenderGraphTextures(renderGraph, cameraData, fogVolume, out TextureHandle downsampledCameraDepthTarget, out TextureHandle volumetricFogRenderTarget, out TextureHandle volumetricFogBlurRenderTarget, out TextureHandle volumetricFogUpsampleCompositionTarget);
@@ -337,6 +364,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			passData.lightData = lightData;
 			passData.fogVolume = fogVolume;
 			passData.cameraPosition = cameraPosition;
+			passData.camera = sceneCamera;
 
 			builder.SetRenderAttachment(volumetricFogRenderTarget, 0, AccessFlags.WriteAll);
 			builder.UseTexture(downsampledCameraDepthTarget);
@@ -421,7 +449,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="mainLightIndex"></param>
 	/// <param name="additionalLightsCount"></param>
 	/// <param name="visibleLights"></param>
-	private static void UpdateVolumetricFogMaterialParameters(Material volumetricFogMaterial, VolumetricFogVolumeComponent fogVolume, Vector3 cameraPosition, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights)
+	private static void UpdateVolumetricFogMaterialParameters(Material volumetricFogMaterial, VolumetricFogVolumeComponent fogVolume, Camera camera, Vector3 cameraPosition, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights)
 	{
 		if (fogVolume == null)
 			return;
@@ -499,6 +527,23 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			}
 		}
 
+		bool enableFroxelClusteredLights = enableAdditionalLightsContribution && effectiveAdditionalLightsCount > 0;
+		int froxelHash = 0;
+		if (enableFroxelClusteredLights)
+			enableFroxelClusteredLights = TryConfigureFroxelClusteredLights(volumetricFogMaterial, camera, effectiveAdditionalLightsCount, out froxelHash);
+
+		if (!isMaterialStateInitialized || cachedFroxelClusteredLightsEnabled != enableFroxelClusteredLights)
+		{
+			if (enableFroxelClusteredLights)
+				volumetricFogMaterial.EnableKeyword("_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS");
+			else
+				volumetricFogMaterial.DisableKeyword("_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS");
+
+			cachedFroxelClusteredLightsEnabled = enableFroxelClusteredLights;
+		}
+
+		cachedFroxelHash = froxelHash;
+
 		isMaterialStateInitialized = true;
 	}
 
@@ -539,10 +584,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 				int additionalLightIndex = additionalLightSlotIndex++;
 				VisibleLight visibleLight = visibleLights[i];
 
-				if (!TryGetAdditionalLightCandidate(visibleLight, cameraPosition, fogDistance, fogMinHeight, fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score))
+				if (!TryGetAdditionalLightCandidate(visibleLight, cameraPosition, fogDistance, fogMinHeight, fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score, out Vector3 lightPosition, out float lightRange))
 					continue;
 
-				TryInsertSelectedAdditionalLight(additionalLightIndex, anisotropy, scattering, radiusSq, score, maxAdditionalLights, ref effectiveAdditionalLightsCount);
+				TryInsertSelectedAdditionalLight(additionalLightIndex, anisotropy, scattering, radiusSq, score, lightPosition, lightRange, maxAdditionalLights, ref effectiveAdditionalLightsCount);
 			}
 		}
 
@@ -577,12 +622,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="radiusSq"></param>
 	/// <param name="score"></param>
 	/// <returns></returns>
-	private static bool TryGetAdditionalLightCandidate(in VisibleLight visibleLight, in Vector3 cameraPosition, float fogDistance, float fogMinHeight, float fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score)
+	private static bool TryGetAdditionalLightCandidate(in VisibleLight visibleLight, in Vector3 cameraPosition, float fogDistance, float fogMinHeight, float fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score, out Vector3 lightPosition, out float lightRange)
 	{
 		anisotropy = 0.0f;
 		scattering = 0.0f;
 		radiusSq = 0.0f;
 		score = 0.0f;
+		lightPosition = Vector3.zero;
+		lightRange = 0.0f;
 
 		Light light = visibleLight.light;
 		if (light == null || !light.enabled || !light.gameObject.activeInHierarchy)
@@ -600,14 +647,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			return false;
 
 		float range = Mathf.Max(light.range, 0.01f);
-		Vector3 lightPosition = light.transform.position;
+		Vector3 lightWorldPosition = light.transform.position;
 		float maxDistance = fogDistance + range;
-		float distanceSq = (lightPosition - cameraPosition).sqrMagnitude;
+		float distanceSq = (lightWorldPosition - cameraPosition).sqrMagnitude;
 		if (distanceSq > maxDistance * maxDistance)
 			return false;
 
-		float lightMinY = lightPosition.y - range;
-		float lightMaxY = lightPosition.y + range;
+		float lightMinY = lightWorldPosition.y - range;
+		float lightMaxY = lightWorldPosition.y + range;
 		if (lightMaxY < fogMinHeight || lightMinY > fogMaxHeight)
 			return false;
 
@@ -622,6 +669,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			score *= Mathf.Max(0.25f, spotAngleCos);
 		}
 
+		lightPosition = lightWorldPosition;
+		lightRange = range;
+
 		return score > 0.0f;
 	}
 
@@ -635,7 +685,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="score"></param>
 	/// <param name="maxAdditionalLights"></param>
 	/// <param name="selectedCount"></param>
-	private static void TryInsertSelectedAdditionalLight(int additionalLightIndex, float anisotropy, float scattering, float radiusSq, float score, int maxAdditionalLights, ref int selectedCount)
+	private static void TryInsertSelectedAdditionalLight(int additionalLightIndex, float anisotropy, float scattering, float radiusSq, float score, Vector3 lightPosition, float lightRange, int maxAdditionalLights, ref int selectedCount)
 	{
 		if (maxAdditionalLights <= 0)
 			return;
@@ -669,6 +719,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		SelectedScatterings[selectedIndex] = scattering;
 		SelectedRadiiSq[selectedIndex] = radiusSq;
 		SelectedScores[selectedIndex] = score;
+		SelectedLightPositions[selectedIndex] = lightPosition;
+		SelectedLightRanges[selectedIndex] = lightRange;
 	}
 
 	/// <summary>
@@ -696,6 +748,230 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			{
 				hash = (hash * 31) + Anisotropies[additionalLightsCount].GetHashCode();
 				hash = (hash * 31) + Scatterings[additionalLightsCount].GetHashCode();
+			}
+
+			return hash;
+		}
+	}
+
+	/// <summary>
+	/// Configures clustered froxel buffers and bindings for additional lights.
+	/// </summary>
+	/// <param name="material"></param>
+	/// <param name="camera"></param>
+	/// <param name="selectedAdditionalLightsCount"></param>
+	/// <param name="froxelHash"></param>
+	/// <returns></returns>
+	private static bool TryConfigureFroxelClusteredLights(Material material, Camera camera, int selectedAdditionalLightsCount, out int froxelHash)
+	{
+		froxelHash = 0;
+		if (camera == null || selectedAdditionalLightsCount <= 0 || !SystemInfo.supportsComputeShaders)
+			return false;
+
+		froxelHash = ComputeFroxelInputHash(camera, selectedAdditionalLightsCount);
+
+		EnsureFroxelBuffersAllocated();
+		if (froxelMetaBuffer == null || froxelLightIndicesBuffer == null)
+			return false;
+
+		if (!isMaterialStateInitialized || froxelHash != cachedFroxelHash)
+		{
+			BuildFroxelClusters(camera, selectedAdditionalLightsCount);
+			froxelMetaBuffer.SetData(FroxelMetas);
+			froxelLightIndicesBuffer.SetData(FroxelLightIndices);
+		}
+
+		material.SetBuffer(FroxelMetaBufferId, froxelMetaBuffer);
+		material.SetBuffer(FroxelLightIndicesBufferId, froxelLightIndicesBuffer);
+		material.SetVector(FroxelGridDimensionsId, new Vector4(FroxelGridWidth, FroxelGridHeight, FroxelGridDepth, FroxelMaxLightsPerCell));
+		material.SetVector(FroxelNearFarId, new Vector4(camera.nearClipPlane, camera.farClipPlane, 0.0f, 0.0f));
+
+		return true;
+	}
+
+	/// <summary>
+	/// Ensures froxel buffers are allocated.
+	/// </summary>
+	private static void EnsureFroxelBuffersAllocated()
+	{
+		if (froxelMetaBuffer == null || froxelMetaBuffer.count != FroxelCount || froxelMetaBuffer.stride != sizeof(int) * 2)
+		{
+			froxelMetaBuffer?.Release();
+			froxelMetaBuffer = new ComputeBuffer(FroxelCount, sizeof(int) * 2, ComputeBufferType.Structured);
+		}
+
+		int froxelLightIndicesCount = FroxelCount * FroxelMaxLightsPerCell;
+		if (froxelLightIndicesBuffer == null || froxelLightIndicesBuffer.count != froxelLightIndicesCount || froxelLightIndicesBuffer.stride != sizeof(int))
+		{
+			froxelLightIndicesBuffer?.Release();
+			froxelLightIndicesBuffer = new ComputeBuffer(froxelLightIndicesCount, sizeof(int), ComputeBufferType.Structured);
+		}
+	}
+
+	/// <summary>
+	/// Builds clustered froxel light lists from selected additional lights.
+	/// </summary>
+	/// <param name="camera"></param>
+	/// <param name="selectedAdditionalLightsCount"></param>
+	private static void BuildFroxelClusters(Camera camera, int selectedAdditionalLightsCount)
+	{
+		Array.Clear(FroxelCellLightCounts, 0, FroxelCellLightCounts.Length);
+		for (int i = 0; i < FroxelLightIndices.Length; ++i)
+			FroxelLightIndices[i] = -1;
+
+		float near = Mathf.Max(camera.nearClipPlane, 0.01f);
+		float far = Mathf.Max(camera.farClipPlane, near + 0.01f);
+
+		Matrix4x4 viewMatrix = camera.worldToCameraMatrix;
+		Matrix4x4 viewProjectionMatrix = camera.projectionMatrix * viewMatrix;
+		Vector3 cameraRight = camera.transform.right;
+		Vector3 cameraUp = camera.transform.up;
+
+		int froxelPlaneStride = FroxelGridWidth * FroxelGridHeight;
+		float invLogDepthRange = 1.0f / Mathf.Max(Mathf.Log(far / near), 0.0001f);
+
+		for (int compactLightIndex = 0; compactLightIndex < selectedAdditionalLightsCount; ++compactLightIndex)
+		{
+			Vector3 lightPosition = SelectedLightPositions[compactLightIndex];
+			float lightRange = Mathf.Max(SelectedLightRanges[compactLightIndex], 0.01f);
+
+			Vector3 lightPositionView = viewMatrix.MultiplyPoint(lightPosition);
+			float lightEyeDepth = -lightPositionView.z;
+
+			float minDepth = Mathf.Max(near, lightEyeDepth - lightRange);
+			float maxDepth = Mathf.Min(far, lightEyeDepth + lightRange);
+			if (maxDepth <= minDepth)
+				continue;
+
+			int minZ = DepthToFroxelSlice(minDepth, near, invLogDepthRange);
+			int maxZ = DepthToFroxelSlice(maxDepth, near, invLogDepthRange);
+			if (maxZ < minZ)
+				continue;
+
+			if (!TryGetLightScreenBounds(lightPosition, lightRange, cameraRight, cameraUp, viewProjectionMatrix, out float minU, out float maxU, out float minV, out float maxV))
+				continue;
+
+			int minX = Mathf.Clamp(Mathf.FloorToInt(minU * FroxelGridWidth), 0, FroxelGridWidth - 1);
+			int maxX = Mathf.Clamp(Mathf.FloorToInt(maxU * FroxelGridWidth), 0, FroxelGridWidth - 1);
+			int minY = Mathf.Clamp(Mathf.FloorToInt(minV * FroxelGridHeight), 0, FroxelGridHeight - 1);
+			int maxY = Mathf.Clamp(Mathf.FloorToInt(maxV * FroxelGridHeight), 0, FroxelGridHeight - 1);
+			if (maxX < minX || maxY < minY)
+				continue;
+
+			for (int z = minZ; z <= maxZ; ++z)
+			{
+				int froxelPlaneBase = z * froxelPlaneStride;
+				for (int y = minY; y <= maxY; ++y)
+				{
+					int froxelRowBase = froxelPlaneBase + y * FroxelGridWidth;
+					for (int x = minX; x <= maxX; ++x)
+					{
+						int froxelIndex = froxelRowBase + x;
+						int count = FroxelCellLightCounts[froxelIndex];
+						if (count >= FroxelMaxLightsPerCell)
+							continue;
+
+						int offset = froxelIndex * FroxelMaxLightsPerCell + count;
+						FroxelLightIndices[offset] = compactLightIndex;
+						FroxelCellLightCounts[froxelIndex] = count + 1;
+					}
+				}
+			}
+		}
+
+		for (int i = 0; i < FroxelCount; ++i)
+		{
+			FroxelMetas[i].offset = i * FroxelMaxLightsPerCell;
+			FroxelMetas[i].count = FroxelCellLightCounts[i];
+		}
+	}
+
+	/// <summary>
+	/// Converts eye depth to a froxel Z slice.
+	/// </summary>
+	/// <param name="eyeDepth"></param>
+	/// <param name="near"></param>
+	/// <param name="invLogDepthRange"></param>
+	/// <returns></returns>
+	private static int DepthToFroxelSlice(float eyeDepth, float near, float invLogDepthRange)
+	{
+		float normalizedDepth = Mathf.Log(Mathf.Max(eyeDepth / near, 1.0f)) * invLogDepthRange;
+		int slice = Mathf.FloorToInt(normalizedDepth * FroxelGridDepth);
+		return Mathf.Clamp(slice, 0, FroxelGridDepth - 1);
+	}
+
+	/// <summary>
+	/// Gets screen-space bounds for a spherical light proxy.
+	/// </summary>
+	/// <param name="lightPosition"></param>
+	/// <param name="lightRange"></param>
+	/// <param name="cameraRight"></param>
+	/// <param name="cameraUp"></param>
+	/// <param name="viewProjectionMatrix"></param>
+	/// <param name="minU"></param>
+	/// <param name="maxU"></param>
+	/// <param name="minV"></param>
+	/// <param name="maxV"></param>
+	/// <returns></returns>
+	private static bool TryGetLightScreenBounds(Vector3 lightPosition, float lightRange, Vector3 cameraRight, Vector3 cameraUp, Matrix4x4 viewProjectionMatrix, out float minU, out float maxU, out float minV, out float maxV)
+	{
+		minU = 0.0f;
+		maxU = 1.0f;
+		minV = 0.0f;
+		maxV = 1.0f;
+
+		Vector4 clipCenter = viewProjectionMatrix * new Vector4(lightPosition.x, lightPosition.y, lightPosition.z, 1.0f);
+		if (clipCenter.w <= 0.0001f)
+			return false;
+
+		Vector2 ndcCenter = new Vector2(clipCenter.x, clipCenter.y) / clipCenter.w;
+		Vector4 clipRight = viewProjectionMatrix * new Vector4(lightPosition.x + cameraRight.x * lightRange, lightPosition.y + cameraRight.y * lightRange, lightPosition.z + cameraRight.z * lightRange, 1.0f);
+		Vector4 clipUp = viewProjectionMatrix * new Vector4(lightPosition.x + cameraUp.x * lightRange, lightPosition.y + cameraUp.y * lightRange, lightPosition.z + cameraUp.z * lightRange, 1.0f);
+		if (clipRight.w <= 0.0001f || clipUp.w <= 0.0001f)
+			return false;
+
+		Vector2 ndcRight = new Vector2(clipRight.x, clipRight.y) / clipRight.w;
+		Vector2 ndcUp = new Vector2(clipUp.x, clipUp.y) / clipUp.w;
+		float radiusX = Mathf.Abs(ndcRight.x - ndcCenter.x);
+		float radiusY = Mathf.Abs(ndcUp.y - ndcCenter.y);
+		float radius = Mathf.Max(Mathf.Max(radiusX, radiusY), 0.001f);
+
+		float minNdcX = ndcCenter.x - radius;
+		float maxNdcX = ndcCenter.x + radius;
+		float minNdcY = ndcCenter.y - radius;
+		float maxNdcY = ndcCenter.y + radius;
+		if (maxNdcX < -1.0f || minNdcX > 1.0f || maxNdcY < -1.0f || minNdcY > 1.0f)
+			return false;
+
+		minU = Mathf.Clamp01(minNdcX * 0.5f + 0.5f);
+		maxU = Mathf.Clamp01(maxNdcX * 0.5f + 0.5f);
+		minV = Mathf.Clamp01(minNdcY * 0.5f + 0.5f);
+		maxV = Mathf.Clamp01(maxNdcY * 0.5f + 0.5f);
+		return true;
+	}
+
+	/// <summary>
+	/// Computes the hash used to validate froxel clusters cache.
+	/// </summary>
+	/// <param name="camera"></param>
+	/// <param name="selectedAdditionalLightsCount"></param>
+	/// <returns></returns>
+	private static int ComputeFroxelInputHash(Camera camera, int selectedAdditionalLightsCount)
+	{
+		unchecked
+		{
+			int hash = 17;
+			hash = (hash * 31) + selectedAdditionalLightsCount;
+			hash = (hash * 31) + camera.transform.position.GetHashCode();
+			hash = (hash * 31) + camera.transform.rotation.GetHashCode();
+			hash = (hash * 31) + camera.nearClipPlane.GetHashCode();
+			hash = (hash * 31) + camera.farClipPlane.GetHashCode();
+
+			for (int i = 0; i < selectedAdditionalLightsCount; ++i)
+			{
+				hash = (hash * 31) + SelectedAdditionalIndices[i];
+				hash = (hash * 31) + SelectedLightPositions[i].GetHashCode();
+				hash = (hash * 31) + SelectedLightRanges[i].GetHashCode();
 			}
 
 			return hash;
@@ -783,12 +1059,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedMainLightContributionEnabled = false;
 		cachedAdditionalLightsContributionEnabled = false;
 		cachedSceneViewMainCameraFrustumMaskEnabled = false;
+		cachedFroxelClusteredLightsEnabled = false;
 #if UNITY_2023_1_OR_NEWER
 		cachedAPVContributionEnabled = false;
 #endif
 		cachedAdditionalLightsCount = int.MinValue;
 		cachedLightsHash = int.MinValue;
 		cachedMainCameraFrustumPlanesHash = int.MinValue;
+		cachedFroxelHash = int.MinValue;
 		cachedDistance = float.NaN;
 		cachedBaseHeight = float.NaN;
 		cachedMaximumHeight = float.NaN;
@@ -801,6 +1079,18 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedTint = new Color(float.NaN, float.NaN, float.NaN, float.NaN);
 		cachedMaxSteps = int.MinValue;
 		cachedTransmittanceThreshold = float.NaN;
+	}
+
+	/// <summary>
+	/// Releases clustered froxel GPU buffers.
+	/// </summary>
+	private static void ReleaseFroxelBuffers()
+	{
+		froxelMetaBuffer?.Release();
+		froxelMetaBuffer = null;
+
+		froxelLightIndicesBuffer?.Release();
+		froxelLightIndicesBuffer = null;
 	}
 
 #if UNITY_6000_0_OR_NEWER
@@ -850,7 +1140,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (stage == PassStage.VolumetricFogRender)
 		{
 			passData.material.SetTexture(DownsampledCameraDepthTextureId, passData.downsampledCameraDepthTarget);
-			UpdateVolumetricFogMaterialParameters(passData.material, passData.fogVolume, passData.cameraPosition, passData.lightData.mainLightIndex, passData.lightData.additionalLightsCount, passData.lightData.visibleLights);
+			UpdateVolumetricFogMaterialParameters(passData.material, passData.fogVolume, passData.camera, passData.cameraPosition, passData.lightData.mainLightIndex, passData.lightData.additionalLightsCount, passData.lightData.visibleLights);
 		}
 		else if (stage == PassStage.VolumetricFogUpsampleComposition)
 		{
@@ -918,6 +1208,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		volumetricFogRenderRTHandle?.Release();
 		volumetricFogBlurRTHandle?.Release();
 		volumetricFogUpsampleCompositionRTHandle?.Release();
+		ReleaseFroxelBuffers();
 		ResetMaterialStateCache();
 	}
 

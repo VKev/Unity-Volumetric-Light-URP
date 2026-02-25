@@ -33,6 +33,7 @@ Shader "Hidden/VolumetricFog"
             #pragma multi_compile_local_fragment _ _MAIN_LIGHT_CONTRIBUTION_DISABLED
             #pragma multi_compile_local_fragment _ _ADDITIONAL_LIGHTS_CONTRIBUTION_DISABLED
             #pragma multi_compile_local_fragment _ _APV_CONTRIBUTION_ENABLED
+            #pragma multi_compile_local_fragment _ _FROXEL_CLUSTERED_ADDITIONAL_LIGHTS
 
             #pragma vertex Vert
             #pragma fragment Frag
