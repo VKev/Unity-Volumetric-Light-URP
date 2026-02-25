@@ -22,6 +22,13 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		public int count;
 	}
 
+	private struct DebugSolidCubeDraw
+	{
+		public Vector3 center;
+		public float halfExtent;
+		public Color color;
+	}
+
 #if UNITY_6000_0_OR_NEWER
 
 	/// <summary>
@@ -162,6 +169,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static Color debugFroxelColor = new Color(0.0f, 1.0f, 1.0f, 1.0f);
 	private static Material debugSolidCubeMaterial;
 	private static Mesh debugUnitCubeMesh;
+	private static MaterialPropertyBlock debugSolidCubePropertyBlock;
+	private static readonly DebugSolidCubeDraw[] debugSolidCubeDraws = new DebugSolidCubeDraw[FroxelCount];
+	private static int debugSolidCubeDrawCount;
 
 	private static bool isMaterialStateInitialized;
 	private static bool cachedMainLightContributionEnabled;
@@ -342,6 +352,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			RTHandle cameraColorRt = renderingData.cameraData.renderer.cameraColorTargetHandle;
 			Blitter.BlitCameraTexture(cmd, cameraColorRt, volumetricFogUpsampleCompositionRTHandle, volumetricFogMaterial, volumetricFogUpsampleCompositionPassIndex);
 			Blitter.BlitCameraTexture(cmd, volumetricFogUpsampleCompositionRTHandle, cameraColorRt);
+			DrawQueuedDebugSolidCubes(cmd, renderingData.cameraData.camera);
 		}
 
 		context.ExecuteCommandBuffer(cmd);
@@ -430,6 +441,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			passData.material = volumetricFogMaterial;
 			passData.materialPassIndex = volumetricFogUpsampleCompositionPassIndex;
 			passData.volumetricFogRenderTarget = volumetricFogRenderTarget;
+			passData.camera = sceneCamera;
 
 			builder.SetRenderAttachment(volumetricFogUpsampleCompositionTarget, 0, AccessFlags.WriteAll);
 			builder.UseTexture(resourceData.cameraDepthTexture);
@@ -925,6 +937,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="camera"></param>
 	private static void DrawFroxelDebug(Camera camera, bool restrictToMainCameraFrustum, Vector4[] mainCameraFrustumPlanes)
 	{
+		debugSolidCubeDrawCount = 0;
+
 		if (!debugDrawFroxelClusters || camera == null || camera.cameraType != CameraType.SceneView)
 			return;
 
@@ -1073,20 +1087,52 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="camera"></param>
 	private static void DrawWorldSpaceSolidCube(Vector3 center, float halfExtent, Color color, Camera camera)
 	{
-		if (camera == null || debugWorldSpaceCubeFillOpacity <= 0.0f)
+		if (camera == null || debugWorldSpaceCubeFillOpacity <= 0.0f || debugSolidCubeDrawCount >= debugSolidCubeDraws.Length)
 			return;
+
+		debugSolidCubeDraws[debugSolidCubeDrawCount].center = center;
+		debugSolidCubeDraws[debugSolidCubeDrawCount].halfExtent = halfExtent;
+		debugSolidCubeDraws[debugSolidCubeDrawCount].color = color;
+		debugSolidCubeDrawCount++;
+	}
+
+	/// <summary>
+	/// Draws all queued translucent debug cubes through the current command buffer.
+	/// </summary>
+	/// <param name="cmd"></param>
+	/// <param name="camera"></param>
+	private static void DrawQueuedDebugSolidCubes(CommandBuffer cmd, Camera camera)
+	{
+		if (cmd == null || camera == null || debugSolidCubeDrawCount <= 0 || debugWorldSpaceCubeFillOpacity <= 0.0f)
+		{
+			debugSolidCubeDrawCount = 0;
+			return;
+		}
 
 		if (!EnsureDebugSolidCubeResources())
+		{
+			debugSolidCubeDrawCount = 0;
 			return;
+		}
 
-		Color fillColor = color;
-		fillColor.a = Mathf.Clamp01(debugWorldSpaceCubeFillOpacity * Mathf.Max(debugFroxelColor.a, 0.0001f));
-		debugSolidCubeMaterial.SetColor(DebugColorId, fillColor);
+		if (debugSolidCubePropertyBlock == null)
+			debugSolidCubePropertyBlock = new MaterialPropertyBlock();
 
-		Vector3 scale = Vector3.one * (halfExtent * 2.0f);
-		Matrix4x4 matrix = Matrix4x4.TRS(center, Quaternion.identity, scale);
-		if (debugSolidCubeMaterial.SetPass(0))
-			Graphics.DrawMeshNow(debugUnitCubeMesh, matrix);
+		float fillAlpha = Mathf.Clamp01(debugWorldSpaceCubeFillOpacity * Mathf.Max(debugFroxelColor.a, 0.0001f));
+		for (int i = 0; i < debugSolidCubeDrawCount; ++i)
+		{
+			DebugSolidCubeDraw cube = debugSolidCubeDraws[i];
+			Color fillColor = cube.color;
+			fillColor.a = fillAlpha;
+
+			debugSolidCubePropertyBlock.SetColor(DebugColorId, fillColor);
+
+			Vector3 scale = Vector3.one * (cube.halfExtent * 2.0f);
+			Matrix4x4 matrix = Matrix4x4.TRS(cube.center, Quaternion.identity, scale);
+			cmd.DrawMesh(debugUnitCubeMesh, matrix, debugSolidCubeMaterial, 0, 0, debugSolidCubePropertyBlock);
+		}
+
+		debugSolidCubeDrawCount = 0;
 	}
 
 	/// <summary>
@@ -1131,11 +1177,27 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (debugSolidCubeMaterial == null)
 		{
 			Shader debugShader = Shader.Find("Hidden/VolumetricFogDebugSolid");
+			bool usingFallbackInternalColored = false;
+			if (debugShader == null)
+			{
+				debugShader = Shader.Find("Hidden/Internal-Colored");
+				usingFallbackInternalColored = debugShader != null;
+			}
+
 			if (debugShader == null)
 				return false;
 
 			debugSolidCubeMaterial = new Material(debugShader);
 			debugSolidCubeMaterial.hideFlags = HideFlags.HideAndDontSave;
+
+			if (usingFallbackInternalColored)
+			{
+				debugSolidCubeMaterial.SetInt("_SrcBlend", (int)BlendMode.SrcAlpha);
+				debugSolidCubeMaterial.SetInt("_DstBlend", (int)BlendMode.OneMinusSrcAlpha);
+				debugSolidCubeMaterial.SetInt("_Cull", (int)CullMode.Back);
+				debugSolidCubeMaterial.SetInt("_ZWrite", 0);
+				debugSolidCubeMaterial.SetInt("_ZTest", (int)CompareFunction.LessEqual);
+			}
 		}
 
 		if (debugUnitCubeMesh == null)
@@ -1199,6 +1261,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		}
 
 		debugUnitCubeMesh = null;
+		debugSolidCubePropertyBlock = null;
+		debugSolidCubeDrawCount = 0;
 	}
 
 	/// <summary>
@@ -1508,6 +1572,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static void ExecutePass(PassData passData, RasterGraphContext context)
 	{
 		PassStage stage = passData.stage;
+		CommandBuffer cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
 
 		if (stage == PassStage.VolumetricFogRender)
 		{
@@ -1520,6 +1585,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		}
 
 		Blitter.BlitTexture(context.cmd, passData.source, Vector2.one, passData.material, passData.materialPassIndex);
+
+		if (stage == PassStage.VolumetricFogUpsampleComposition)
+			DrawQueuedDebugSolidCubes(cmd, passData.camera);
 	}
 
 	/// <summary>
