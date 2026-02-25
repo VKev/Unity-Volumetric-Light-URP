@@ -274,6 +274,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		debugFroxelColor = froxelColor;
 	}
 
+	/// <summary>
+	/// Invalidates cached material state so all fog parameters are pushed again on next execution.
+	/// </summary>
+	public void InvalidateMaterialStateCache()
+	{
+		ResetMaterialStateCache();
+	}
+
 	#endregion
 
 	#region Scriptable Render Pass Methods

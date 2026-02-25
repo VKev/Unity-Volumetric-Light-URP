@@ -65,10 +65,12 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 		if (!EnsureVolumetricFogRenderPassInitialized(false))
 			return;
 
-		Camera mainCamera = Camera.main;
-		if (mainCamera != null)
-			lastKnownMainCamera = mainCamera;
-		Camera scenePreviewMainCamera = mainCamera != null ? mainCamera : lastKnownMainCamera;
+		if (renderingData.cameraData.cameraType == CameraType.SceneView)
+			volumetricFogRenderPass.InvalidateMaterialStateCache();
+
+		Camera scenePreviewMainCamera = ResolveMainCamera();
+		if (scenePreviewMainCamera != null)
+			lastKnownMainCamera = scenePreviewMainCamera;
 
 		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
 		bool shouldPreviewMainCameraRegionInSceneView = ShouldPreviewMainCameraRegionInSceneView(renderingData.cameraData, scenePreviewMainCamera);
@@ -103,6 +105,35 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	#endregion
 
 	#region Methods
+
+	/// <summary>
+	/// Resolves the main camera with fallbacks for editor refresh moments where Camera.main can be temporarily null.
+	/// </summary>
+	/// <returns></returns>
+	private Camera ResolveMainCamera()
+	{
+		Camera mainCamera = Camera.main;
+		if (mainCamera != null)
+			return mainCamera;
+
+		if (lastKnownMainCamera != null)
+			return lastKnownMainCamera;
+
+		Camera[] allCameras = Resources.FindObjectsOfTypeAll<Camera>();
+		for (int i = 0; i < allCameras.Length; ++i)
+		{
+			Camera camera = allCameras[i];
+			if (camera == null || !camera.CompareTag("MainCamera"))
+				continue;
+
+			if (!camera.gameObject.scene.IsValid())
+				continue;
+
+			return camera;
+		}
+
+		return null;
+	}
 
 	/// <summary>
 	/// Ensures pass resources are valid and the render pass is constructed with the current materials.
