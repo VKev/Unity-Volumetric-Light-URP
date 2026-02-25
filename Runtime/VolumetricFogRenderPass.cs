@@ -1075,7 +1075,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		float halfExtent = cubeSize * 0.45f;
 
 		DrawWorldSpaceSolidCube(center, halfExtent, color, camera);
-		DrawWorldSpaceWireCube(center, halfExtent, color);
 	}
 
 	/// <summary>
@@ -1175,39 +1174,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		debugSolidCubeDrawCount = 0;
 	}
 #endif
-
-	/// <summary>
-	/// Draws an axis-aligned world-space wire cube.
-	/// </summary>
-	/// <param name="center"></param>
-	/// <param name="halfExtent"></param>
-	/// <param name="color"></param>
-	private static void DrawWorldSpaceWireCube(Vector3 center, float halfExtent, Color color)
-	{
-		Vector3 p000 = center + new Vector3(-halfExtent, -halfExtent, -halfExtent);
-		Vector3 p100 = center + new Vector3(halfExtent, -halfExtent, -halfExtent);
-		Vector3 p110 = center + new Vector3(halfExtent, halfExtent, -halfExtent);
-		Vector3 p010 = center + new Vector3(-halfExtent, halfExtent, -halfExtent);
-		Vector3 p001 = center + new Vector3(-halfExtent, -halfExtent, halfExtent);
-		Vector3 p101 = center + new Vector3(halfExtent, -halfExtent, halfExtent);
-		Vector3 p111 = center + new Vector3(halfExtent, halfExtent, halfExtent);
-		Vector3 p011 = center + new Vector3(-halfExtent, halfExtent, halfExtent);
-
-		Debug.DrawLine(p000, p100, color, 0.0f, true);
-		Debug.DrawLine(p100, p110, color, 0.0f, true);
-		Debug.DrawLine(p110, p010, color, 0.0f, true);
-		Debug.DrawLine(p010, p000, color, 0.0f, true);
-
-		Debug.DrawLine(p001, p101, color, 0.0f, true);
-		Debug.DrawLine(p101, p111, color, 0.0f, true);
-		Debug.DrawLine(p111, p011, color, 0.0f, true);
-		Debug.DrawLine(p011, p001, color, 0.0f, true);
-
-		Debug.DrawLine(p000, p001, color, 0.0f, true);
-		Debug.DrawLine(p100, p101, color, 0.0f, true);
-		Debug.DrawLine(p110, p111, color, 0.0f, true);
-		Debug.DrawLine(p010, p011, color, 0.0f, true);
-	}
 
 	/// <summary>
 	/// Ensures resources needed to draw translucent debug cubes are allocated.
