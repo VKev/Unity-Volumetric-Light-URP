@@ -1,0 +1,117 @@
+#pragma kernel CSInjectStaticVoxelLights
+
+struct StaticVoxelLightData
+{
+	float4 colorAndType;
+	float4 positionRangeSq;
+	float4 directionAnisotropy;
+	float4 attenuation;
+	float4 lightParams;
+};
+
+RWTexture3D<float4> _StaticVoxelLightingRW;
+RWTexture3D<float4> _StaticVoxelDirectionRW;
+StructuredBuffer<StaticVoxelLightData> _StaticVoxelLightDataBuffer;
+
+int _StaticVoxelLightCount;
+int3 _StaticVoxelResolution;
+float3 _StaticVoxelBoundsMin;
+float3 _StaticVoxelBoundsSize;
+
+float Luminance(float3 color)
+{
+	return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
+
+float EvaluateDistanceAttenuation(float distanceSq, float invRangeSq)
+{
+	float safeDistanceSq = max(distanceSq, 0.0001);
+	float distanceFactor = saturate(1.0 - (distanceSq * invRangeSq));
+	distanceFactor *= distanceFactor;
+	distanceFactor *= distanceFactor;
+	return distanceFactor / safeDistanceSq;
+}
+
+[numthreads(4, 4, 4)]
+void CSInjectStaticVoxelLights(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+	if (dispatchThreadId.x >= (uint)_StaticVoxelResolution.x || dispatchThreadId.y >= (uint)_StaticVoxelResolution.y || dispatchThreadId.z >= (uint)_StaticVoxelResolution.z)
+		return;
+
+	float3 resolution = max(float3(_StaticVoxelResolution), float3(1.0, 1.0, 1.0));
+	float3 uvw = (float3(dispatchThreadId) + 0.5) / resolution;
+	float3 positionWS = _StaticVoxelBoundsMin + uvw * _StaticVoxelBoundsSize;
+
+	float3 accumulatedColor = float3(0.0, 0.0, 0.0);
+	float3 weightedDirection = float3(0.0, 0.0, 0.0);
+	float weightedAnisotropy = 0.0;
+	float totalWeight = 0.0;
+
+	[loop]
+	for (int i = 0; i < _StaticVoxelLightCount; ++i)
+	{
+		StaticVoxelLightData lightData = _StaticVoxelLightDataBuffer[i];
+		float3 lightColor = lightData.colorAndType.rgb;
+		float lightType = lightData.colorAndType.w;
+		float scattering = lightData.lightParams.y;
+		if (scattering <= 0.0)
+			continue;
+
+		float3 directionToLight = float3(0.0, 0.0, 1.0);
+		float attenuation = 1.0;
+
+		if (lightType > 1.5) // Directional
+		{
+			float3 lightForward = normalize(lightData.directionAnisotropy.xyz);
+			directionToLight = -lightForward;
+		}
+		else // Point/Spot
+		{
+			float3 toLight = lightData.positionRangeSq.xyz - positionWS;
+			float distanceSq = dot(toLight, toLight);
+			if (distanceSq >= lightData.positionRangeSq.w)
+				continue;
+
+			float safeDistanceSq = max(distanceSq, 0.000001);
+			directionToLight = toLight * rsqrt(safeDistanceSq);
+			attenuation = EvaluateDistanceAttenuation(safeDistanceSq, lightData.attenuation.x);
+
+			if (lightType > 0.5) // Spot
+			{
+				float3 spotDirection = normalize(lightData.directionAnisotropy.xyz);
+				float spotAttenuation = saturate(dot(-spotDirection, directionToLight) * lightData.attenuation.z + lightData.attenuation.w);
+				spotAttenuation *= spotAttenuation;
+				attenuation *= spotAttenuation;
+			}
+
+			float radiusSq = max(lightData.lightParams.x, 0.000001);
+			float radialFade = saturate(safeDistanceSq / radiusSq);
+			radialFade = radialFade * radialFade * (3.0 - 2.0 * radialFade);
+			radialFade *= radialFade;
+			attenuation *= radialFade;
+		}
+
+		float3 contribution = lightColor * (attenuation * scattering);
+		accumulatedColor += contribution;
+
+		float weight = max(0.000001, Luminance(contribution));
+		weightedDirection += directionToLight * weight;
+		weightedAnisotropy += lightData.directionAnisotropy.w * weight;
+		totalWeight += weight;
+	}
+
+	float3 dominantDirection = float3(0.0, 0.0, 1.0);
+	float anisotropy = 0.0;
+	if (totalWeight > 0.000001)
+	{
+		float dirLengthSq = dot(weightedDirection, weightedDirection);
+		if (dirLengthSq > 0.000001)
+			dominantDirection = weightedDirection * rsqrt(dirLengthSq);
+
+		anisotropy = clamp(weightedAnisotropy / totalWeight, -0.99, 0.99);
+	}
+
+	float anisotropyEncoded = anisotropy * 0.5 + 0.5;
+	_StaticVoxelLightingRW[dispatchThreadId] = float4(accumulatedColor, anisotropyEncoded);
+	_StaticVoxelDirectionRW[dispatchThreadId] = float4(dominantDirection * 0.5 + 0.5, 1.0);
+}

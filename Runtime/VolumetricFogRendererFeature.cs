@@ -15,6 +15,8 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	[SerializeField] private Shader downsampleDepthShader;
 	[HideInInspector]
 	[SerializeField] private Shader volumetricFogShader;
+	[HideInInspector]
+	[SerializeField] private ComputeShader volumetricStaticVoxelComputeShader;
 	[Tooltip("Render volumetric fog in Scene View cameras.")]
 	[SerializeField] private bool renderInSceneView;
 	[Tooltip("Render volumetric fog in overlay cameras from camera stacks.")]
@@ -64,6 +66,10 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	{
 		if (!EnsureVolumetricFogRenderPassInitialized(false))
 			return;
+
+		if (volumetricStaticVoxelComputeShader == null)
+			volumetricStaticVoxelComputeShader = Resources.Load<ComputeShader>("VolumetricStaticVoxel");
+		VolumetricFogRenderPass.SetStaticVoxelComputeShader(volumetricStaticVoxelComputeShader);
 
 		if (renderingData.cameraData.cameraType == CameraType.SceneView)
 			volumetricFogRenderPass.InvalidateMaterialStateCache();
@@ -150,7 +156,7 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 				return false;
 
 			volumetricFogRenderPass?.Dispose();
-			volumetricFogRenderPass = new VolumetricFogRenderPass(downsampleDepthMaterial, volumetricFogMaterial, VolumetricFogRenderPass.DefaultRenderPassEvent);
+			volumetricFogRenderPass = new VolumetricFogRenderPass(downsampleDepthMaterial, volumetricFogMaterial, volumetricStaticVoxelComputeShader, VolumetricFogRenderPass.DefaultRenderPassEvent);
 		}
 
 		return volumetricFogRenderPass != null;
@@ -163,6 +169,9 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// <returns></returns>
 	private bool ValidateResourcesForVolumetricFogRenderPass(bool forceRefresh)
 	{
+		if (volumetricStaticVoxelComputeShader == null)
+			volumetricStaticVoxelComputeShader = Resources.Load<ComputeShader>("VolumetricStaticVoxel");
+
 		if (forceRefresh)
 		{
 #if UNITY_EDITOR

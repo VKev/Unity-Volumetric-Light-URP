@@ -1,5 +1,6 @@
 using UnityEditor;
 using UnityEditor.Rendering;
+using UnityEngine;
 
 /// <summary>
 /// Custom editor for the volumetric fog volume component.
@@ -18,6 +19,16 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 	private SerializedDataParameter density;
 	private SerializedDataParameter attenuationDistance;
+	private SerializedDataParameter lightingMode;
+	private SerializedDataParameter staticVoxelIncludeMainLight;
+	private SerializedDataParameter staticVoxelBoundsCenter;
+	private SerializedDataParameter staticVoxelBoundsSize;
+	private SerializedDataParameter staticVoxelResolutionX;
+	private SerializedDataParameter staticVoxelResolutionY;
+	private SerializedDataParameter staticVoxelResolutionZ;
+	private SerializedDataParameter staticVoxelIntensity;
+	private SerializedDataParameter staticVoxelDirectionalPhase;
+	private SerializedDataParameter staticVoxelUpdateMode;
 #if UNITY_2023_1_OR_NEWER
 	private SerializedDataParameter enableAPVContribution;
 	private SerializedDataParameter APVContributionWeight;
@@ -59,6 +70,16 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 		density = Unpack(pf.Find(x => x.density));
 		attenuationDistance = Unpack(pf.Find(x => x.attenuationDistance));
+		lightingMode = Unpack(pf.Find(x => x.lightingMode));
+		staticVoxelIncludeMainLight = Unpack(pf.Find(x => x.staticVoxelIncludeMainLight));
+		staticVoxelBoundsCenter = Unpack(pf.Find(x => x.staticVoxelBoundsCenter));
+		staticVoxelBoundsSize = Unpack(pf.Find(x => x.staticVoxelBoundsSize));
+		staticVoxelResolutionX = Unpack(pf.Find(x => x.staticVoxelResolutionX));
+		staticVoxelResolutionY = Unpack(pf.Find(x => x.staticVoxelResolutionY));
+		staticVoxelResolutionZ = Unpack(pf.Find(x => x.staticVoxelResolutionZ));
+		staticVoxelIntensity = Unpack(pf.Find(x => x.staticVoxelIntensity));
+		staticVoxelDirectionalPhase = Unpack(pf.Find(x => x.staticVoxelDirectionalPhase));
+		staticVoxelUpdateMode = Unpack(pf.Find(x => x.staticVoxelUpdateMode));
 #if UNITY_2023_1_OR_NEWER
 		enableAPVContribution = Unpack(pf.Find(x => x.enableAPVContribution));
 		APVContributionWeight = Unpack(pf.Find(x => x.APVContributionWeight));
@@ -108,6 +129,23 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 		PropertyField(density);
 		PropertyField(attenuationDistance);
+		PropertyField(lightingMode);
+		bool staticVoxelLightingMode = (VolumetricFogLightingMode)lightingMode.value.intValue == VolumetricFogLightingMode.StaticVoxelDynamicRealtime;
+		if (staticVoxelLightingMode)
+		{
+			PropertyField(staticVoxelIncludeMainLight);
+			PropertyField(staticVoxelBoundsCenter);
+			PropertyField(staticVoxelBoundsSize);
+			PropertyField(staticVoxelResolutionX);
+			PropertyField(staticVoxelResolutionY);
+			PropertyField(staticVoxelResolutionZ);
+			PropertyField(staticVoxelIntensity);
+			PropertyField(staticVoxelDirectionalPhase);
+			PropertyField(staticVoxelUpdateMode);
+
+			if (GUILayout.Button("Rebuild Static Voxel Volume"))
+				VolumetricFogRenderPass.RequestStaticVoxelRebuild();
+		}
 #if UNITY_2023_1_OR_NEWER
 		bool enabledAPVContribution = enableAPVContribution.overrideState.boolValue && enableAPVContribution.value.boolValue;
 		PropertyField(enableAPVContribution);

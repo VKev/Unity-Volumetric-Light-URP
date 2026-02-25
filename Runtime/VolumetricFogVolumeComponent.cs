@@ -39,6 +39,28 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	public ClampedFloatParameter density = new ClampedFloatParameter(0.2f, 0.0f, 1.0f);
 	[Tooltip("Value that defines how much the fog attenuates light as distance increases. Lesser values lead to a darker image.")]
 	public MinFloatParameter attenuationDistance = new MinFloatParameter(128.0f, 0.05f);
+	[Tooltip("RuntimeOnly evaluates all fog lights in real time. StaticVoxelDynamicRealtime injects static-tagged lights into a runtime voxel volume and keeps dynamic lights in real time.")]
+	public VolumetricFogLightingModeParameter lightingMode = new VolumetricFogLightingModeParameter(VolumetricFogLightingMode.RuntimeOnly);
+
+	[Header("Static Voxel Lighting")]
+	[Tooltip("When enabled and StaticVoxelDynamicRealtime is selected, the current main light is injected into the static voxel volume instead of being evaluated dynamically.")]
+	public BoolParameter staticVoxelIncludeMainLight = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
+	[Tooltip("World-space center of the static voxel lighting volume.")]
+	public Vector3Parameter staticVoxelBoundsCenter = new Vector3Parameter(new Vector3(0.0f, 16.0f, 0.0f), true);
+	[Tooltip("World-space size of the static voxel lighting volume.")]
+	public Vector3Parameter staticVoxelBoundsSize = new Vector3Parameter(new Vector3(128.0f, 64.0f, 128.0f), true);
+	[Tooltip("Voxel resolution on X axis.")]
+	public ClampedIntParameter staticVoxelResolutionX = new ClampedIntParameter(64, 8, 256);
+	[Tooltip("Voxel resolution on Y axis.")]
+	public ClampedIntParameter staticVoxelResolutionY = new ClampedIntParameter(32, 8, 256);
+	[Tooltip("Voxel resolution on Z axis.")]
+	public ClampedIntParameter staticVoxelResolutionZ = new ClampedIntParameter(64, 8, 256);
+	[Tooltip("Global multiplier for static voxel lighting contribution.")]
+	public ClampedFloatParameter staticVoxelIntensity = new ClampedFloatParameter(1.0f, 0.0f, 8.0f);
+	[Tooltip("When enabled, static voxel samples use directional phase from stored dominant light direction and anisotropy.")]
+	public BoolParameter staticVoxelDirectionalPhase = new BoolParameter(true, BoolParameter.DisplayType.Checkbox, true);
+	[Tooltip("Defines when the runtime static voxel volume should be rebuilt.")]
+	public VolumetricFogStaticVoxelUpdateModeParameter staticVoxelUpdateMode = new VolumetricFogStaticVoxelUpdateModeParameter(VolumetricFogStaticVoxelUpdateMode.OnChange);
 #if UNITY_2023_1_OR_NEWER
 	[Tooltip("When enabled, adaptive probe volumes (APV) will be sampled to contribute to fog.")]
 	public BoolParameter enableAPVContribution = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
@@ -96,6 +118,12 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 		maximumHeight.overrideState = baseHeight.overrideState;
 		maximumHeight.value = Mathf.Max(baseHeight.value, maximumHeight.value);
 		baseHeight.value = Mathf.Min(baseHeight.value, maximumHeight.value);
+
+		Vector3 boundsSize = staticVoxelBoundsSize.value;
+		boundsSize.x = Mathf.Max(0.01f, boundsSize.x);
+		boundsSize.y = Mathf.Max(0.01f, boundsSize.y);
+		boundsSize.z = Mathf.Max(0.01f, boundsSize.z);
+		staticVoxelBoundsSize.value = boundsSize;
 	}
 
 	#endregion

@@ -29,6 +29,15 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		public Color color;
 	}
 
+	private struct StaticVoxelLightData
+	{
+		public Vector4 colorAndType;
+		public Vector4 positionRangeSq;
+		public Vector4 directionAnisotropy;
+		public Vector4 attenuation;
+		public Vector4 lightParams;
+	}
+
 #if UNITY_6000_0_OR_NEWER
 
 	/// <summary>
@@ -109,6 +118,17 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int FroxelNearFarId = Shader.PropertyToID("_FroxelNearFar");
 	private static readonly int FroxelMetaBufferId = Shader.PropertyToID("_FroxelMetaBuffer");
 	private static readonly int FroxelLightIndicesBufferId = Shader.PropertyToID("_FroxelLightIndicesBuffer");
+	private static readonly int StaticVoxelLightingTextureId = Shader.PropertyToID("_StaticVoxelLightingTex");
+	private static readonly int StaticVoxelDirectionTextureId = Shader.PropertyToID("_StaticVoxelDirectionTex");
+	private static readonly int StaticVoxelBoundsMinId = Shader.PropertyToID("_StaticVoxelBoundsMin");
+	private static readonly int StaticVoxelBoundsSizeInvId = Shader.PropertyToID("_StaticVoxelBoundsSizeInv");
+	private static readonly int StaticVoxelIntensityId = Shader.PropertyToID("_StaticVoxelIntensity");
+	private static readonly int StaticVoxelResolutionId = Shader.PropertyToID("_StaticVoxelResolution");
+	private static readonly int StaticVoxelBoundsSizeId = Shader.PropertyToID("_StaticVoxelBoundsSize");
+	private static readonly int StaticVoxelLightDataBufferId = Shader.PropertyToID("_StaticVoxelLightDataBuffer");
+	private static readonly int StaticVoxelLightCountId = Shader.PropertyToID("_StaticVoxelLightCount");
+	private static readonly int StaticVoxelLightingRWId = Shader.PropertyToID("_StaticVoxelLightingRW");
+	private static readonly int StaticVoxelDirectionRWId = Shader.PropertyToID("_StaticVoxelDirectionRW");
 
 	private static readonly int AnisotropiesArrayId = Shader.PropertyToID("_Anisotropies");
 	private static readonly int ScatteringsArrayId = Shader.PropertyToID("_Scatterings");
@@ -116,11 +136,13 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int AdditionalLightIndicesArrayId = Shader.PropertyToID("_AdditionalLightIndices");
 
 	private const int MaxVisibleAdditionalLights = 256;
+	private const int MaxStaticVoxelLights = 256;
 	private const int FroxelGridWidth = 16;
 	private const int FroxelGridHeight = 9;
 	private const int FroxelGridDepth = 24;
 	private const int FroxelMaxLightsPerCell = 24;
 	private const int FroxelCount = FroxelGridWidth * FroxelGridHeight * FroxelGridDepth;
+	private const float MinStaticVoxelBoundsSize = 0.01f;
 	private const float MinAdditionalLightScattering = 0.0001f;
 	private const float MinAdditionalLightIntensity = 0.001f;
 	private static int LightsParametersLength = MaxVisibleAdditionalLights + 1;
@@ -140,9 +162,15 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly FroxelMeta[] FroxelMetas = new FroxelMeta[FroxelCount];
 	private static readonly int[] FroxelLightIndices = new int[FroxelCount * FroxelMaxLightsPerCell];
 	private static readonly int[] FroxelCellLightCounts = new int[FroxelCount];
+	private static readonly StaticVoxelLightData[] StaticVoxelLights = new StaticVoxelLightData[MaxStaticVoxelLights];
 
 	private static ComputeBuffer froxelMetaBuffer;
 	private static ComputeBuffer froxelLightIndicesBuffer;
+	private static ComputeBuffer staticVoxelLightsBuffer;
+	private static RenderTexture staticVoxelLightingTexture;
+	private static RenderTexture staticVoxelDirectionTexture;
+	private static ComputeShader staticVoxelComputeShader;
+	private static int staticVoxelInjectKernelIndex = -1;
 
 	private int downsampleDepthPassIndex;
 	private int volumetricFogRenderPassIndex;
@@ -178,6 +206,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static bool cachedAdditionalLightsContributionEnabled;
 	private static bool cachedSceneViewMainCameraFrustumMaskEnabled;
 	private static bool cachedFroxelClusteredLightsEnabled;
+	private static bool cachedStaticVoxelLightingEnabled;
+	private static bool cachedStaticVoxelDirectionalPhaseEnabled;
 #if UNITY_2023_1_OR_NEWER
 	private static bool cachedAPVContributionEnabled;
 #endif
@@ -185,6 +215,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static int cachedLightsHash;
 	private static int cachedMainCameraFrustumPlanesHash;
 	private static int cachedFroxelHash;
+	private static int cachedStaticVoxelInputHash;
 	private static float cachedDistance;
 	private static float cachedBaseHeight;
 	private static float cachedMaximumHeight;
@@ -197,6 +228,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static Color cachedTint;
 	private static int cachedMaxSteps;
 	private static float cachedTransmittanceThreshold;
+	private static float cachedStaticVoxelIntensity;
+	private static Vector3 cachedStaticVoxelBoundsMin;
+	private static Vector3 cachedStaticVoxelBoundsSizeInv;
+	private static int cachedStaticVoxelLightsCount;
+	private static int cachedStaticVoxelLightsHash;
+	private static bool cachedStaticVoxelIncludesMainLight;
+	private static bool staticVoxelVolumeValid;
+	private static bool staticVoxelRebuildRequested;
 
 	#endregion
 
@@ -207,8 +246,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// </summary>
 	/// <param name="downsampleDepthMaterial"></param>
 	/// <param name="volumetricFogMaterial"></param>
+	/// <param name="staticVoxelComputeShader"></param>
 	/// <param name="passEvent"></param>
-	public VolumetricFogRenderPass(Material downsampleDepthMaterial, Material volumetricFogMaterial, RenderPassEvent passEvent) : base()
+	public VolumetricFogRenderPass(Material downsampleDepthMaterial, Material volumetricFogMaterial, ComputeShader staticVoxelComputeShader, RenderPassEvent passEvent) : base()
 	{
 		profilingSampler = new ProfilingSampler("Volumetric Fog");
 		downsampleDepthProfilingSampler = new ProfilingSampler("Downsample Depth");
@@ -219,6 +259,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		this.downsampleDepthMaterial = downsampleDepthMaterial;
 		this.volumetricFogMaterial = volumetricFogMaterial;
+		VolumetricFogRenderPass.staticVoxelComputeShader = staticVoxelComputeShader;
 
 		InitializePassesIndices();
 		ResetMaterialStateCache();
@@ -280,6 +321,24 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	public void InvalidateMaterialStateCache()
 	{
 		ResetMaterialStateCache();
+	}
+
+	/// <summary>
+	/// Requests rebuilding the static voxel lighting volume.
+	/// </summary>
+	public static void RequestStaticVoxelRebuild()
+	{
+		staticVoxelRebuildRequested = true;
+	}
+
+	/// <summary>
+	/// Updates the compute shader used by static voxel runtime injection.
+	/// </summary>
+	/// <param name="computeShader"></param>
+	public static void SetStaticVoxelComputeShader(ComputeShader computeShader)
+	{
+		if (computeShader != null)
+			staticVoxelComputeShader = computeShader;
 	}
 
 	#endregion
@@ -506,13 +565,20 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (fogVolume == null)
 			return;
 
+		bool staticVoxelIncludesMainLight;
+		bool staticVoxelLightingEnabled = TryConfigureStaticVoxelLighting(volumetricFogMaterial, fogVolume, mainLightIndex, visibleLights, out staticVoxelIncludesMainLight);
+		bool excludeStaticVoxelAdditionalLights = staticVoxelLightingEnabled;
+
 		bool enableMainLightContribution = fogVolume.enableMainLightContribution.value && fogVolume.scattering.value > 0.0f && mainLightIndex > -1;
+		if (staticVoxelLightingEnabled && staticVoxelIncludesMainLight)
+			enableMainLightContribution = false;
+
 		bool enableAdditionalLightsContribution = fogVolume.enableAdditionalLightsContribution.value && additionalLightsCount > 0 && fogVolume.maxAdditionalLights.value > 0;
 
 		int lightsHash = 0;
 		int effectiveAdditionalLightsCount = 0;
 		if (enableMainLightContribution || enableAdditionalLightsContribution)
-			effectiveAdditionalLightsCount = UpdateLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
+			effectiveAdditionalLightsCount = UpdateLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, excludeStaticVoxelAdditionalLights, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
 
 		enableAdditionalLightsContribution &= effectiveAdditionalLightsCount > 0;
 
@@ -600,6 +666,474 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	}
 
 	/// <summary>
+	/// Configures static voxel lighting and uploads runtime bindings.
+	/// </summary>
+	/// <param name="material"></param>
+	/// <param name="fogVolume"></param>
+	/// <param name="mainLightIndex"></param>
+	/// <param name="visibleLights"></param>
+	/// <param name="staticVoxelIncludesMainLight"></param>
+	/// <returns></returns>
+	private static bool TryConfigureStaticVoxelLighting(Material material, VolumetricFogVolumeComponent fogVolume, int mainLightIndex, NativeArray<VisibleLight> visibleLights, out bool staticVoxelIncludesMainLight)
+	{
+		staticVoxelIncludesMainLight = false;
+
+		bool staticVoxelModeEnabled = fogVolume != null
+			&& fogVolume.lightingMode.value == VolumetricFogLightingMode.StaticVoxelDynamicRealtime
+			&& fogVolume.staticVoxelIntensity.value > 0.0f;
+
+		if (!staticVoxelModeEnabled || material == null || staticVoxelComputeShader == null || !SystemInfo.supportsComputeShaders)
+		{
+			DisableStaticVoxelMaterialBindings(material);
+			return false;
+		}
+
+		VolumetricFogStaticVoxelUpdateMode updateMode = fogVolume.staticVoxelUpdateMode.value;
+		bool shouldRefreshStaticLights = !staticVoxelVolumeValid || staticVoxelRebuildRequested || updateMode == VolumetricFogStaticVoxelUpdateMode.OnChange;
+
+		int staticLightsHash = cachedStaticVoxelLightsHash;
+		int staticLightsCount = cachedStaticVoxelLightsCount;
+		if (shouldRefreshStaticLights)
+		{
+			staticLightsCount = CollectStaticVoxelLights(fogVolume, mainLightIndex, visibleLights, out staticVoxelIncludesMainLight, out staticLightsHash);
+			cachedStaticVoxelLightsCount = staticLightsCount;
+			cachedStaticVoxelLightsHash = staticLightsHash;
+			cachedStaticVoxelIncludesMainLight = staticVoxelIncludesMainLight;
+		}
+		else
+		{
+			staticVoxelIncludesMainLight = cachedStaticVoxelIncludesMainLight;
+		}
+
+		if (staticLightsCount <= 0)
+		{
+			staticVoxelVolumeValid = false;
+			DisableStaticVoxelMaterialBindings(material);
+			return false;
+		}
+
+		int resolutionX = Mathf.Clamp(fogVolume.staticVoxelResolutionX.value, 8, 256);
+		int resolutionY = Mathf.Clamp(fogVolume.staticVoxelResolutionY.value, 8, 256);
+		int resolutionZ = Mathf.Clamp(fogVolume.staticVoxelResolutionZ.value, 8, 256);
+		Vector3 boundsCenter = fogVolume.staticVoxelBoundsCenter.value;
+		Vector3 boundsSize = GetSafeStaticVoxelBoundsSize(fogVolume.staticVoxelBoundsSize.value);
+
+		int staticVoxelInputHash = ComputeStaticVoxelInputHash(boundsCenter, boundsSize, resolutionX, resolutionY, resolutionZ, staticLightsHash);
+		bool shouldRebuild = ShouldRebuildStaticVoxelVolume(updateMode, staticVoxelInputHash);
+		if (shouldRebuild)
+		{
+			staticVoxelVolumeValid = BuildStaticVoxelVolume(resolutionX, resolutionY, resolutionZ, boundsCenter, boundsSize, staticLightsCount);
+			if (staticVoxelVolumeValid)
+				cachedStaticVoxelInputHash = staticVoxelInputHash;
+
+			staticVoxelRebuildRequested = false;
+		}
+
+		bool staticVoxelLightingEnabled = staticVoxelVolumeValid && staticVoxelLightingTexture != null && staticVoxelDirectionTexture != null;
+		if (!isMaterialStateInitialized || cachedStaticVoxelLightingEnabled != staticVoxelLightingEnabled)
+		{
+			if (staticVoxelLightingEnabled)
+				material.EnableKeyword("_STATIC_VOXEL_LIGHTING_ENABLED");
+			else
+				material.DisableKeyword("_STATIC_VOXEL_LIGHTING_ENABLED");
+
+			cachedStaticVoxelLightingEnabled = staticVoxelLightingEnabled;
+		}
+
+		bool directionalPhaseEnabled = staticVoxelLightingEnabled && fogVolume.staticVoxelDirectionalPhase.value;
+		if (!isMaterialStateInitialized || cachedStaticVoxelDirectionalPhaseEnabled != directionalPhaseEnabled)
+		{
+			if (directionalPhaseEnabled)
+				material.EnableKeyword("_STATIC_VOXEL_DIRECTIONAL_PHASE");
+			else
+				material.DisableKeyword("_STATIC_VOXEL_DIRECTIONAL_PHASE");
+
+			cachedStaticVoxelDirectionalPhaseEnabled = directionalPhaseEnabled;
+		}
+
+		if (!staticVoxelLightingEnabled)
+		{
+			material.SetTexture(StaticVoxelLightingTextureId, null);
+			material.SetTexture(StaticVoxelDirectionTextureId, null);
+			material.SetVector(StaticVoxelBoundsMinId, Vector4.zero);
+			material.SetVector(StaticVoxelBoundsSizeInvId, Vector4.zero);
+			SetFloatIfChanged(material, StaticVoxelIntensityId, 0.0f, ref cachedStaticVoxelIntensity);
+			return false;
+		}
+
+		Vector3 boundsMin = boundsCenter - (boundsSize * 0.5f);
+		Vector3 boundsSizeInv = new Vector3(1.0f / boundsSize.x, 1.0f / boundsSize.y, 1.0f / boundsSize.z);
+		material.SetTexture(StaticVoxelLightingTextureId, staticVoxelLightingTexture);
+		material.SetTexture(StaticVoxelDirectionTextureId, staticVoxelDirectionTexture);
+
+		if (!isMaterialStateInitialized || (cachedStaticVoxelBoundsMin - boundsMin).sqrMagnitude > 0.000001f)
+		{
+			material.SetVector(StaticVoxelBoundsMinId, new Vector4(boundsMin.x, boundsMin.y, boundsMin.z, 0.0f));
+			cachedStaticVoxelBoundsMin = boundsMin;
+		}
+
+		if (!isMaterialStateInitialized || (cachedStaticVoxelBoundsSizeInv - boundsSizeInv).sqrMagnitude > 0.000001f)
+		{
+			material.SetVector(StaticVoxelBoundsSizeInvId, new Vector4(boundsSizeInv.x, boundsSizeInv.y, boundsSizeInv.z, 0.0f));
+			cachedStaticVoxelBoundsSizeInv = boundsSizeInv;
+		}
+
+		SetFloatIfChanged(material, StaticVoxelIntensityId, fogVolume.staticVoxelIntensity.value, ref cachedStaticVoxelIntensity);
+		return true;
+	}
+
+	/// <summary>
+	/// Disables static voxel material bindings.
+	/// </summary>
+	/// <param name="material"></param>
+	private static void DisableStaticVoxelMaterialBindings(Material material)
+	{
+		if (material == null)
+			return;
+
+		if (!isMaterialStateInitialized || cachedStaticVoxelLightingEnabled)
+		{
+			material.DisableKeyword("_STATIC_VOXEL_LIGHTING_ENABLED");
+			cachedStaticVoxelLightingEnabled = false;
+		}
+
+		if (!isMaterialStateInitialized || cachedStaticVoxelDirectionalPhaseEnabled)
+		{
+			material.DisableKeyword("_STATIC_VOXEL_DIRECTIONAL_PHASE");
+			cachedStaticVoxelDirectionalPhaseEnabled = false;
+		}
+
+		material.SetTexture(StaticVoxelLightingTextureId, null);
+		material.SetTexture(StaticVoxelDirectionTextureId, null);
+		material.SetVector(StaticVoxelBoundsMinId, Vector4.zero);
+		material.SetVector(StaticVoxelBoundsSizeInvId, Vector4.zero);
+		SetFloatIfChanged(material, StaticVoxelIntensityId, 0.0f, ref cachedStaticVoxelIntensity);
+	}
+
+	/// <summary>
+	/// Returns whether static voxel data should be rebuilt.
+	/// </summary>
+	/// <param name="updateMode"></param>
+	/// <param name="inputHash"></param>
+	/// <returns></returns>
+	private static bool ShouldRebuildStaticVoxelVolume(VolumetricFogStaticVoxelUpdateMode updateMode, int inputHash)
+	{
+		if (!staticVoxelVolumeValid)
+			return true;
+		if (staticVoxelRebuildRequested)
+			return true;
+		if (updateMode == VolumetricFogStaticVoxelUpdateMode.OnLoad)
+			return false;
+		if (updateMode == VolumetricFogStaticVoxelUpdateMode.OnChange)
+			return inputHash != cachedStaticVoxelInputHash;
+
+		return false;
+	}
+
+	/// <summary>
+	/// Builds static voxel textures by injecting static-tagged lights through a compute shader.
+	/// </summary>
+	/// <param name="resolutionX"></param>
+	/// <param name="resolutionY"></param>
+	/// <param name="resolutionZ"></param>
+	/// <param name="boundsCenter"></param>
+	/// <param name="boundsSize"></param>
+	/// <param name="lightCount"></param>
+	/// <returns></returns>
+	private static bool BuildStaticVoxelVolume(int resolutionX, int resolutionY, int resolutionZ, Vector3 boundsCenter, Vector3 boundsSize, int lightCount)
+	{
+		if (staticVoxelComputeShader == null || lightCount <= 0)
+			return false;
+
+		EnsureStaticVoxelTexturesAllocated(resolutionX, resolutionY, resolutionZ);
+		EnsureStaticVoxelLightsBufferAllocated(lightCount);
+		if (staticVoxelLightingTexture == null || staticVoxelDirectionTexture == null || staticVoxelLightsBuffer == null)
+			return false;
+
+		staticVoxelLightsBuffer.SetData(StaticVoxelLights, 0, 0, lightCount);
+
+		if (staticVoxelInjectKernelIndex < 0)
+		{
+			try
+			{
+				staticVoxelInjectKernelIndex = staticVoxelComputeShader.FindKernel("CSInjectStaticVoxelLights");
+			}
+			catch
+			{
+				staticVoxelInjectKernelIndex = -1;
+			}
+		}
+
+		if (staticVoxelInjectKernelIndex < 0)
+			return false;
+
+		Vector3 boundsMin = boundsCenter - (boundsSize * 0.5f);
+
+		staticVoxelComputeShader.SetInt(StaticVoxelLightCountId, lightCount);
+		staticVoxelComputeShader.SetInts(StaticVoxelResolutionId, resolutionX, resolutionY, resolutionZ);
+		staticVoxelComputeShader.SetVector(StaticVoxelBoundsMinId, new Vector4(boundsMin.x, boundsMin.y, boundsMin.z, 0.0f));
+		staticVoxelComputeShader.SetVector(StaticVoxelBoundsSizeId, new Vector4(boundsSize.x, boundsSize.y, boundsSize.z, 0.0f));
+		staticVoxelComputeShader.SetBuffer(staticVoxelInjectKernelIndex, StaticVoxelLightDataBufferId, staticVoxelLightsBuffer);
+		staticVoxelComputeShader.SetTexture(staticVoxelInjectKernelIndex, StaticVoxelLightingRWId, staticVoxelLightingTexture);
+		staticVoxelComputeShader.SetTexture(staticVoxelInjectKernelIndex, StaticVoxelDirectionRWId, staticVoxelDirectionTexture);
+
+		int dispatchX = Mathf.CeilToInt(resolutionX / 4.0f);
+		int dispatchY = Mathf.CeilToInt(resolutionY / 4.0f);
+		int dispatchZ = Mathf.CeilToInt(resolutionZ / 4.0f);
+		staticVoxelComputeShader.Dispatch(staticVoxelInjectKernelIndex, dispatchX, dispatchY, dispatchZ);
+		return true;
+	}
+
+	/// <summary>
+	/// Collects lights that should be injected in the static voxel volume.
+	/// </summary>
+	/// <param name="fogVolume"></param>
+	/// <param name="mainLightIndex"></param>
+	/// <param name="visibleLights"></param>
+	/// <param name="includesMainLight"></param>
+	/// <param name="lightsHash"></param>
+	/// <returns></returns>
+	private static int CollectStaticVoxelLights(VolumetricFogVolumeComponent fogVolume, int mainLightIndex, NativeArray<VisibleLight> visibleLights, out bool includesMainLight, out int lightsHash)
+	{
+		int count = 0;
+		includesMainLight = false;
+
+		if (fogVolume != null && fogVolume.staticVoxelIncludeMainLight.value)
+			includesMainLight = TryAddMainLightAsStaticVoxel(fogVolume, mainLightIndex, visibleLights, ref count);
+
+		TryAddStaticVoxelAdditionalLights(ref count);
+		lightsHash = ComputeStaticVoxelLightsHash(count);
+		return count;
+	}
+
+	/// <summary>
+	/// Tries to add the main light as a static voxel light.
+	/// </summary>
+	/// <param name="fogVolume"></param>
+	/// <param name="mainLightIndex"></param>
+	/// <param name="visibleLights"></param>
+	/// <param name="count"></param>
+	/// <returns></returns>
+	private static bool TryAddMainLightAsStaticVoxel(VolumetricFogVolumeComponent fogVolume, int mainLightIndex, NativeArray<VisibleLight> visibleLights, ref int count)
+	{
+		if (fogVolume == null || count >= MaxStaticVoxelLights || mainLightIndex < 0 || mainLightIndex >= visibleLights.Length)
+			return false;
+
+		VisibleLight visibleLight = visibleLights[mainLightIndex];
+		Light light = visibleLight.light;
+		if (light == null || !light.enabled || !light.gameObject.activeInHierarchy || light.type != LightType.Directional)
+			return false;
+
+		float scattering = fogVolume.scattering.value;
+		if (scattering <= MinAdditionalLightScattering)
+			return false;
+
+		Color lightColorLinear = light.color.linear * Mathf.Max(0.0f, light.intensity);
+		Color tintLinear = fogVolume.tint.value.linear;
+		Vector3 color = new Vector3(lightColorLinear.r * tintLinear.r, lightColorLinear.g * tintLinear.g, lightColorLinear.b * tintLinear.b);
+		Vector3 forward = light.transform.forward;
+
+		StaticVoxelLights[count].colorAndType = new Vector4(color.x, color.y, color.z, 2.0f);
+		StaticVoxelLights[count].positionRangeSq = Vector4.zero;
+		StaticVoxelLights[count].directionAnisotropy = new Vector4(forward.x, forward.y, forward.z, Mathf.Clamp(fogVolume.anisotropy.value, -0.99f, 0.99f));
+		StaticVoxelLights[count].attenuation = Vector4.zero;
+		StaticVoxelLights[count].lightParams = new Vector4(0.0f, scattering, 0.0f, 0.0f);
+		count++;
+		return true;
+	}
+
+	/// <summary>
+	/// Tries to add point and spot lights marked as static voxel lights.
+	/// </summary>
+	/// <param name="count"></param>
+	private static void TryAddStaticVoxelAdditionalLights(ref int count)
+	{
+		var volumetricLights = VolumetricAdditionalLight.LightsRegistry;
+		int volumetricLightsCount = volumetricLights.Count;
+		for (int i = 0; i < volumetricLightsCount; ++i)
+		{
+			VolumetricAdditionalLight volumetricLight = volumetricLights[i];
+			if (volumetricLight == null || !volumetricLight.enabled || !volumetricLight.gameObject.activeInHierarchy)
+				continue;
+			if (volumetricLight.LightMode != VolumetricAdditionalLightMode.StaticVoxel)
+				continue;
+
+			Light light = volumetricLight.CachedLight;
+			if (light == null || !light.enabled || !light.gameObject.activeInHierarchy)
+				continue;
+			if (light.type != LightType.Point && light.type != LightType.Spot)
+				continue;
+
+			float scattering = volumetricLight.Scattering;
+			if (scattering <= MinAdditionalLightScattering || light.intensity <= MinAdditionalLightIntensity)
+				continue;
+			if (count >= MaxStaticVoxelLights)
+				return;
+
+			Color lightColorLinear = light.color.linear * Mathf.Max(0.0f, light.intensity);
+			Vector3 color = new Vector3(lightColorLinear.r, lightColorLinear.g, lightColorLinear.b);
+			Vector3 position = light.transform.position;
+			Vector3 forward = light.transform.forward;
+			float rangeSq = Mathf.Max(light.range * light.range, 0.0001f);
+			float invRangeSq = 1.0f / rangeSq;
+
+			float spotScale = 0.0f;
+			float spotOffset = 0.0f;
+			float lightType = light.type == LightType.Spot ? 1.0f : 0.0f;
+			if (light.type == LightType.Spot)
+			{
+				float outerCos = Mathf.Cos(0.5f * Mathf.Deg2Rad * light.spotAngle);
+				float innerSpotAngle = Mathf.Min(light.innerSpotAngle, light.spotAngle);
+				float innerCos = Mathf.Cos(0.5f * Mathf.Deg2Rad * innerSpotAngle);
+				float denom = Mathf.Max(0.0001f, innerCos - outerCos);
+				spotScale = 1.0f / denom;
+				spotOffset = -outerCos * spotScale;
+			}
+
+			StaticVoxelLights[count].colorAndType = new Vector4(color.x, color.y, color.z, lightType);
+			StaticVoxelLights[count].positionRangeSq = new Vector4(position.x, position.y, position.z, rangeSq);
+			StaticVoxelLights[count].directionAnisotropy = new Vector4(forward.x, forward.y, forward.z, Mathf.Clamp(volumetricLight.Anisotropy, -0.99f, 0.99f));
+			StaticVoxelLights[count].attenuation = new Vector4(invRangeSq, 0.0f, spotScale, spotOffset);
+			StaticVoxelLights[count].lightParams = new Vector4(volumetricLight.Radius * volumetricLight.Radius, scattering, 0.0f, 0.0f);
+			count++;
+		}
+	}
+
+	/// <summary>
+	/// Ensures static voxel textures are allocated with the expected dimensions.
+	/// </summary>
+	/// <param name="resolutionX"></param>
+	/// <param name="resolutionY"></param>
+	/// <param name="resolutionZ"></param>
+	private static void EnsureStaticVoxelTexturesAllocated(int resolutionX, int resolutionY, int resolutionZ)
+	{
+		bool invalidLightingTexture = staticVoxelLightingTexture == null
+			|| !staticVoxelLightingTexture.IsCreated()
+			|| staticVoxelLightingTexture.width != resolutionX
+			|| staticVoxelLightingTexture.height != resolutionY
+			|| staticVoxelLightingTexture.volumeDepth != resolutionZ;
+
+		bool invalidDirectionTexture = staticVoxelDirectionTexture == null
+			|| !staticVoxelDirectionTexture.IsCreated()
+			|| staticVoxelDirectionTexture.width != resolutionX
+			|| staticVoxelDirectionTexture.height != resolutionY
+			|| staticVoxelDirectionTexture.volumeDepth != resolutionZ;
+
+		if (invalidLightingTexture)
+		{
+			staticVoxelLightingTexture?.Release();
+			staticVoxelLightingTexture = CreateStaticVoxelTexture("_StaticVoxelLighting", resolutionX, resolutionY, resolutionZ);
+		}
+
+		if (invalidDirectionTexture)
+		{
+			staticVoxelDirectionTexture?.Release();
+			staticVoxelDirectionTexture = CreateStaticVoxelTexture("_StaticVoxelDirection", resolutionX, resolutionY, resolutionZ);
+		}
+	}
+
+	/// <summary>
+	/// Creates one static voxel texture with random-write enabled.
+	/// </summary>
+	/// <param name="name"></param>
+	/// <param name="resolutionX"></param>
+	/// <param name="resolutionY"></param>
+	/// <param name="resolutionZ"></param>
+	/// <returns></returns>
+	private static RenderTexture CreateStaticVoxelTexture(string name, int resolutionX, int resolutionY, int resolutionZ)
+	{
+		RenderTexture texture = new RenderTexture(resolutionX, resolutionY, 0, RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear);
+		texture.name = name;
+		texture.dimension = TextureDimension.Tex3D;
+		texture.volumeDepth = resolutionZ;
+		texture.enableRandomWrite = true;
+		texture.useMipMap = false;
+		texture.autoGenerateMips = false;
+		texture.wrapMode = TextureWrapMode.Clamp;
+		texture.filterMode = FilterMode.Bilinear;
+		texture.Create();
+		return texture;
+	}
+
+	/// <summary>
+	/// Ensures static voxel light data buffer is allocated.
+	/// </summary>
+	/// <param name="lightsCount"></param>
+	private static void EnsureStaticVoxelLightsBufferAllocated(int lightsCount)
+	{
+		int requiredCount = Mathf.Max(1, lightsCount);
+		int stride = sizeof(float) * 20;
+		if (staticVoxelLightsBuffer == null || staticVoxelLightsBuffer.count != requiredCount || staticVoxelLightsBuffer.stride != stride)
+		{
+			staticVoxelLightsBuffer?.Release();
+			staticVoxelLightsBuffer = new ComputeBuffer(requiredCount, stride, ComputeBufferType.Structured);
+		}
+	}
+
+	/// <summary>
+	/// Computes hash from current static voxel settings and lights.
+	/// </summary>
+	/// <param name="boundsCenter"></param>
+	/// <param name="boundsSize"></param>
+	/// <param name="resolutionX"></param>
+	/// <param name="resolutionY"></param>
+	/// <param name="resolutionZ"></param>
+	/// <param name="lightsHash"></param>
+	/// <returns></returns>
+	private static int ComputeStaticVoxelInputHash(Vector3 boundsCenter, Vector3 boundsSize, int resolutionX, int resolutionY, int resolutionZ, int lightsHash)
+	{
+		unchecked
+		{
+			int hash = 17;
+			hash = (hash * 31) + boundsCenter.GetHashCode();
+			hash = (hash * 31) + boundsSize.GetHashCode();
+			hash = (hash * 31) + resolutionX;
+			hash = (hash * 31) + resolutionY;
+			hash = (hash * 31) + resolutionZ;
+			hash = (hash * 31) + lightsHash;
+			return hash;
+		}
+	}
+
+	/// <summary>
+	/// Computes a hash from static voxel lights array.
+	/// </summary>
+	/// <param name="count"></param>
+	/// <returns></returns>
+	private static int ComputeStaticVoxelLightsHash(int count)
+	{
+		unchecked
+		{
+			int hash = 17;
+			hash = (hash * 31) + count;
+			for (int i = 0; i < count; ++i)
+			{
+				StaticVoxelLightData light = StaticVoxelLights[i];
+				hash = (hash * 31) + light.colorAndType.GetHashCode();
+				hash = (hash * 31) + light.positionRangeSq.GetHashCode();
+				hash = (hash * 31) + light.directionAnisotropy.GetHashCode();
+				hash = (hash * 31) + light.attenuation.GetHashCode();
+				hash = (hash * 31) + light.lightParams.GetHashCode();
+			}
+
+			return hash;
+		}
+	}
+
+	/// <summary>
+	/// Returns bounds size with minimum safe components.
+	/// </summary>
+	/// <param name="boundsSize"></param>
+	/// <returns></returns>
+	private static Vector3 GetSafeStaticVoxelBoundsSize(Vector3 boundsSize)
+	{
+		boundsSize.x = Mathf.Max(MinStaticVoxelBoundsSize, boundsSize.x);
+		boundsSize.y = Mathf.Max(MinStaticVoxelBoundsSize, boundsSize.y);
+		boundsSize.z = Mathf.Max(MinStaticVoxelBoundsSize, boundsSize.z);
+		return boundsSize;
+	}
+
+	/// <summary>
 	/// Updates and selects additional lights that will contribute to fog.
 	/// </summary>
 	/// <param name="fogVolume"></param>
@@ -611,7 +1145,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="cameraPosition"></param>
 	/// <param name="lightsHash"></param>
 	/// <returns></returns>
-	private static int UpdateLightsParameters(VolumetricFogVolumeComponent fogVolume, bool enableMainLightContribution, bool enableAdditionalLightsContribution, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights, Vector3 cameraPosition, out int lightsHash)
+	private static int UpdateLightsParameters(VolumetricFogVolumeComponent fogVolume, bool enableMainLightContribution, bool enableAdditionalLightsContribution, bool excludeStaticVoxelLights, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights, Vector3 cameraPosition, out int lightsHash)
 	{
 		// TODO: Forward+ and deferred+ visibleLights.Length is 256. In forward, it is 257 so the main light is considered apart. In deferred it seems to not have any limit (seen 1.6k and beyond).
 		// All rendering paths have maxVisibleAdditionalLights at 256.
@@ -636,7 +1170,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 				int additionalLightIndex = additionalLightSlotIndex++;
 				VisibleLight visibleLight = visibleLights[i];
 
-				if (!TryGetAdditionalLightCandidate(visibleLight, cameraPosition, fogDistance, fogMinHeight, fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score, out Vector3 lightPosition, out float lightRange))
+				if (!TryGetAdditionalLightCandidate(visibleLight, excludeStaticVoxelLights, cameraPosition, fogDistance, fogMinHeight, fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score, out Vector3 lightPosition, out float lightRange))
 					continue;
 
 				TryInsertSelectedAdditionalLight(additionalLightIndex, anisotropy, scattering, radiusSq, score, lightPosition, lightRange, maxAdditionalLights, ref effectiveAdditionalLightsCount);
@@ -674,7 +1208,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="radiusSq"></param>
 	/// <param name="score"></param>
 	/// <returns></returns>
-	private static bool TryGetAdditionalLightCandidate(in VisibleLight visibleLight, in Vector3 cameraPosition, float fogDistance, float fogMinHeight, float fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score, out Vector3 lightPosition, out float lightRange)
+	private static bool TryGetAdditionalLightCandidate(in VisibleLight visibleLight, bool excludeStaticVoxelLights, in Vector3 cameraPosition, float fogDistance, float fogMinHeight, float fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score, out Vector3 lightPosition, out float lightRange)
 	{
 		anisotropy = 0.0f;
 		scattering = 0.0f;
@@ -692,6 +1226,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			return false;
 
 		if (!light.TryGetComponent(out VolumetricAdditionalLight volumetricLight) || !volumetricLight.enabled || !volumetricLight.gameObject.activeInHierarchy)
+			return false;
+		if (excludeStaticVoxelLights && volumetricLight.LightMode == VolumetricAdditionalLightMode.StaticVoxel)
 			return false;
 
 		scattering = volumetricLight.Scattering;
@@ -1511,6 +2047,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedAdditionalLightsContributionEnabled = false;
 		cachedSceneViewMainCameraFrustumMaskEnabled = false;
 		cachedFroxelClusteredLightsEnabled = false;
+		cachedStaticVoxelLightingEnabled = false;
+		cachedStaticVoxelDirectionalPhaseEnabled = false;
 #if UNITY_2023_1_OR_NEWER
 		cachedAPVContributionEnabled = false;
 #endif
@@ -1530,6 +2068,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedTint = new Color(float.NaN, float.NaN, float.NaN, float.NaN);
 		cachedMaxSteps = int.MinValue;
 		cachedTransmittanceThreshold = float.NaN;
+		cachedStaticVoxelIntensity = float.NaN;
+		cachedStaticVoxelBoundsMin = new Vector3(float.NaN, float.NaN, float.NaN);
+		cachedStaticVoxelBoundsSizeInv = new Vector3(float.NaN, float.NaN, float.NaN);
 	}
 
 	/// <summary>
@@ -1542,6 +2083,29 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		froxelLightIndicesBuffer?.Release();
 		froxelLightIndicesBuffer = null;
+	}
+
+	/// <summary>
+	/// Releases static voxel runtime resources.
+	/// </summary>
+	private static void ReleaseStaticVoxelResources()
+	{
+		staticVoxelLightsBuffer?.Release();
+		staticVoxelLightsBuffer = null;
+
+		staticVoxelLightingTexture?.Release();
+		staticVoxelLightingTexture = null;
+
+		staticVoxelDirectionTexture?.Release();
+		staticVoxelDirectionTexture = null;
+
+		staticVoxelInjectKernelIndex = -1;
+		cachedStaticVoxelInputHash = int.MinValue;
+		cachedStaticVoxelLightsCount = 0;
+		cachedStaticVoxelLightsHash = int.MinValue;
+		cachedStaticVoxelIncludesMainLight = false;
+		staticVoxelVolumeValid = false;
+		staticVoxelRebuildRequested = false;
 	}
 
 #if UNITY_6000_0_OR_NEWER
@@ -1664,6 +2228,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		volumetricFogUpsampleCompositionRTHandle?.Release();
 		ReleaseDebugSolidCubeResources();
 		ReleaseFroxelBuffers();
+		ReleaseStaticVoxelResources();
 		ResetMaterialStateCache();
 	}
 

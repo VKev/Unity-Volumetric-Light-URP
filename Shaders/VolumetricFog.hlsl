@@ -29,6 +29,14 @@ float _APVContributionWeight;
 float _TransmittanceThreshold;
 float3 _Tint;
 int _MaxSteps;
+float4 _StaticVoxelBoundsMin;
+float4 _StaticVoxelBoundsSizeInv;
+float _StaticVoxelIntensity;
+
+TEXTURE3D(_StaticVoxelLightingTex);
+SAMPLER(sampler_StaticVoxelLightingTex);
+TEXTURE3D(_StaticVoxelDirectionTex);
+SAMPLER(sampler_StaticVoxelDirectionTex);
 
 float _Anisotropies[MAX_VISIBLE_LIGHTS + 1];
 float _Scatterings[MAX_VISIBLE_LIGHTS + 1];
@@ -129,6 +137,48 @@ float3 GetStepAdaptiveProbeVolumeEvaluation(float2 uv, float3 posWS, float densi
 #endif
  
     return (float3)apvDiffuseGI;
+}
+
+// Gets static voxel lighting color at one raymarch step.
+float3 GetStepStaticVoxelLightingColor(float3 currPosWS, float3 rd, float density)
+{
+#if _STATIC_VOXEL_LIGHTING_ENABLED
+    const float isotropicPhase = 0.0795774715;
+
+    float3 voxelUv = (currPosWS - _StaticVoxelBoundsMin.xyz) * _StaticVoxelBoundsSizeInv.xyz;
+    UNITY_BRANCH
+    if (any(voxelUv < 0.0) || any(voxelUv > 1.0))
+        return float3(0.0, 0.0, 0.0);
+
+    float4 voxelLighting = SAMPLE_TEXTURE3D(_StaticVoxelLightingTex, sampler_StaticVoxelLightingTex, voxelUv);
+    float3 voxelColor = voxelLighting.rgb;
+    UNITY_BRANCH
+    if (dot(voxelColor, voxelColor) <= 0.0000001)
+        return float3(0.0, 0.0, 0.0);
+
+#if _STATIC_VOXEL_DIRECTIONAL_PHASE
+    float3 voxelDirection = SAMPLE_TEXTURE3D(_StaticVoxelDirectionTex, sampler_StaticVoxelDirectionTex, voxelUv).rgb * 2.0 - 1.0;
+    float dirLenSq = dot(voxelDirection, voxelDirection);
+    float anisotropy = voxelLighting.a * 2.0 - 1.0;
+    UNITY_BRANCH
+    if (dirLenSq > 0.000001)
+    {
+        voxelDirection *= rsqrt(dirLenSq);
+        float phase = CornetteShanksPhaseFunction(anisotropy, dot(rd, voxelDirection));
+        voxelColor *= phase;
+    }
+    else
+    {
+        voxelColor *= isotropicPhase;
+    }
+#else
+    voxelColor *= isotropicPhase;
+#endif
+
+    return voxelColor * (_StaticVoxelIntensity * density);
+#else
+    return float3(0.0, 0.0, 0.0);
+#endif
 }
 
 // Gets the main light color at one raymarch step.
@@ -303,11 +353,12 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         transmittance *= stepAttenuation;
 
         half3 apvColor = (half3)GetStepAdaptiveProbeVolumeEvaluation(uv, currPosWS, density);
+        half3 staticVoxelColor = (half3)GetStepStaticVoxelLightingColor(currPosWS, rd, density);
         half3 mainLightColor = (half3)GetStepMainLightColor(currPosWS, phaseMainLight, density);
         half3 additionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density);
         
         // TODO: Additional contributions? Reflection probes, etc...
-        half3 stepColor = apvColor + mainLightColor + additionalLightsColor;
+        half3 stepColor = apvColor + staticVoxelColor + mainLightColor + additionalLightsColor;
         volumetricFogColor += ((float3)stepColor * (transmittance * stepLength));
 
         UNITY_BRANCH
