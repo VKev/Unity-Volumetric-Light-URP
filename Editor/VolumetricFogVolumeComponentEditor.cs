@@ -192,7 +192,7 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 				Bake3DForTargets();
 				serializedObject.Update();
 			}
-			EditorGUILayout.HelpBox("Baked 3D mode expects externally baked Texture3D assets for extinction and radiance. Runtime still raymarches camera-dependent integration.", MessageType.Info);
+			EditorGUILayout.HelpBox("For no visual change, keep Add Realtime Lights enabled (hybrid mode: baked extinction + realtime lighting). Disable it for pure baked radiance mode (faster but approximate).", MessageType.Info);
 		}
 
 		PropertyField(enableStaticLightsBake);

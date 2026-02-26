@@ -706,16 +706,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		Texture baked3DRadianceTexture = fogVolume.baked3DRadianceTexture.value;
 		bool hasValidBaked3DTextures = enableBaked3DMode && baked3DExtinctionTexture != null && baked3DRadianceTexture != null;
 		bool baked3DAddRealtimeLights = !hasValidBaked3DTextures || fogVolume.baked3DAddRealtimeLights.value;
-		bool excludeStaticLightsFromRealtime = hasValidBaked3DTextures && baked3DAddRealtimeLights;
+		bool excludeStaticLightsFromRealtime = false;
+		bool useOnlyBaked3DLighting = hasValidBaked3DTextures && !baked3DAddRealtimeLights;
 		bool enableMainLightContribution = fogVolume.enableMainLightContribution.value && fogVolume.scattering.value > 0.0f && mainLightIndex > -1;
 		bool enableAdditionalLightsContribution = fogVolume.enableAdditionalLightsContribution.value && additionalLightsCount > 0 && fogVolume.maxAdditionalLights.value > 0;
-		if (excludeStaticLightsFromRealtime && enableMainLightContribution && mainLightIndex >= 0 && mainLightIndex < visibleLights.Length)
-		{
-			Light mainLight = visibleLights[mainLightIndex].light;
-			if (mainLight != null && IsLightStaticForBake(mainLight))
-				enableMainLightContribution = false;
-		}
-		if (!baked3DAddRealtimeLights)
+		if (useOnlyBaked3DLighting)
 		{
 			enableMainLightContribution = false;
 			enableAdditionalLightsContribution = false;

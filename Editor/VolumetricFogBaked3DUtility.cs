@@ -9,6 +9,7 @@ using UnityEngine;
 /// </summary>
 internal static class VolumetricFogBaked3DUtility
 {
+	private const float IsotropicPhase = 0.0795774715f; // 1 / (4 * PI)
 	private const float MinRange = 0.01f;
 	private const float MinRayBias = 0.01f;
 	private const float MinIntensity = 0.001f;
@@ -78,7 +79,7 @@ internal static class VolumetricFogBaked3DUtility
 						{
 							float mainOcclusion = ComputeDirectionalStaticOcclusion(worldPos, mainLightDirection, mainShadowRayDistance);
 							if (mainOcclusion > 0.0f)
-								radiance += mainLightTintedColor * (mainScattering * density * mainOcclusion);
+								radiance += mainLightTintedColor * (mainScattering * density * mainOcclusion * IsotropicPhase);
 						}
 
 						for (int i = 0; i < staticAdditionalLights.Count; ++i)
@@ -112,7 +113,7 @@ internal static class VolumetricFogBaked3DUtility
 							if (occlusion <= 0.0f)
 								continue;
 
-							radiance += light.color * (distanceAttenuation * localScattering * density * occlusion);
+							radiance += light.color * (distanceAttenuation * localScattering * density * occlusion * IsotropicPhase);
 						}
 					}
 

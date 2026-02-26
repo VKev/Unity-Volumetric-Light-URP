@@ -88,7 +88,7 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	[Header("Baked 3D Field")]
 	[Tooltip("When enabled and both baked textures are assigned, fog integrates baked 3D density/radiance fields inside the configured world volume.")]
 	public BoolParameter enableBaked3DMode = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
-	[Tooltip("When enabled in Baked 3D mode, realtime dynamic lights are added on top of baked radiance.")]
+	[Tooltip("When enabled in Baked 3D mode, realtime lighting is kept for visual parity (baked extinction still applies). Disable to use fully baked radiance (faster but approximate).")]
 	public BoolParameter baked3DAddRealtimeLights = new BoolParameter(true, BoolParameter.DisplayType.Checkbox, true);
 	[Tooltip("Baked 3D extinction (density * absorption) texture.")]
 	public TextureParameter baked3DExtinctionTexture = new TextureParameter(null);
