@@ -1210,10 +1210,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (bakedLight.isStaticAtBake && bakedLight.bakedStaticLightIndex >= 0)
 		{
 			VolumetricAdditionalLight volumetricLight = bakedLight.volumetricLight;
-			float currentScattering = volumetricLight.Scattering;
-			float currentIntensity = light.intensity;
-			float currentRange = Mathf.Max(light.range, 0.01f);
-			if (IsStaticLightStillEquivalentToBake(light, volumetricLight, bakedLight, currentRange, currentIntensity, currentScattering))
+			float staticCurrentScattering = volumetricLight.Scattering;
+			float staticCurrentIntensity = light.intensity;
+			float staticCurrentRange = Mathf.Max(light.range, 0.01f);
+			if (IsStaticLightStillEquivalentToBake(light, volumetricLight, bakedLight, staticCurrentRange, staticCurrentIntensity, staticCurrentScattering))
 			{
 				if (!TryGetAdditionalLightCandidate(visibleLight, cameraPosition, fogDistance, fogMinHeight, fogMaxHeight, out anisotropy, out scattering, out radiusSq, out score, out lightPosition, out lightRange))
 					return false;
