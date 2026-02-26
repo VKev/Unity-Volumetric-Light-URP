@@ -262,11 +262,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static bool cachedAPVContributionEnabled;
 #endif
 	private static int cachedAdditionalLightsCount;
-	private static int cachedLightsHash;
+	private static int cachedLightsHash = int.MinValue;
 	private static int cachedMainCameraFrustumPlanesHash;
-	private static int cachedFroxelHash;
-	private static int cachedStaticLightsBakeRevision;
-	private static int cachedBaked3DRevision;
+	private static int cachedFroxelHash = int.MinValue;
+	private static int cachedStaticLightsBakeRevision = int.MinValue;
+	private static int cachedBaked3DRevision = int.MinValue;
 	private static int bakedStaticSceneHash;
 	private static int bakedStaticLightsCount;
 	private static float cachedDistance;
@@ -831,7 +831,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		if (enableMainLightContribution || effectiveAdditionalLightsCount > 0)
 		{
-			bool shouldUploadLightArrays = !isMaterialStateInitialized || lightsHash != cachedLightsHash;
+			bool lightBuffersMissing = anisotropiesBuffer == null || scatteringsBuffer == null || radiiSqBuffer == null || additionalLightIndicesBuffer == null;
+			bool shouldUploadLightArrays = lightBuffersMissing || lightsHash != cachedLightsHash;
 			EnsureLightParameterBuffersAllocated();
 			if (shouldUploadLightArrays)
 			{
@@ -927,7 +928,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		}
 
 		int bakeRevision = bakedStaticSceneHash ^ (bakedStaticLightsCount << 8);
-		bool shouldUpload = !isMaterialStateInitialized || cachedStaticLightsBakeRevision != bakeRevision;
+		bool shouldUpload = cachedStaticLightsBakeRevision != bakeRevision || bakedAdditionalLightOcclusionGridBuffer == null;
 		if (shouldUpload)
 		{
 			material.SetVectorArray(BakedAdditionalLightPositionsArrayId, BakedAdditionalLightPositions);
@@ -1865,11 +1866,12 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		froxelHash = ComputeFroxelInputHash(camera, selectedAdditionalLightsCount);
 
+		bool froxelBuffersMissing = froxelMetaBuffer == null || froxelLightIndicesBuffer == null;
 		EnsureFroxelBuffersAllocated();
 		if (froxelMetaBuffer == null || froxelLightIndicesBuffer == null)
 			return false;
 
-		if (!isMaterialStateInitialized || froxelHash != cachedFroxelHash || forceRebuild)
+		if (froxelBuffersMissing || froxelHash != cachedFroxelHash || forceRebuild)
 		{
 			BuildFroxelClusters(camera, selectedAdditionalLightsCount);
 			froxelMetaBuffer.SetData(FroxelMetas);
@@ -2620,10 +2622,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedAPVContributionEnabled = false;
 #endif
 		cachedAdditionalLightsCount = int.MinValue;
-		cachedLightsHash = int.MinValue;
 		cachedMainCameraFrustumPlanesHash = int.MinValue;
-		cachedFroxelHash = int.MinValue;
-		cachedBaked3DRevision = int.MinValue;
 		cachedDistance = float.NaN;
 		cachedBaseHeight = float.NaN;
 		cachedMaximumHeight = float.NaN;
