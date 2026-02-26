@@ -751,7 +751,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			if (useBakedStaticLightData)
 			{
 				EnsureBakedStaticLightsCache(mainLightIndex, visibleLights);
-				UpdateStaticSceneBakeState();
 				effectiveAdditionalLightsCount = UpdateBakedLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, excludeStaticLightsFromRealtime, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
 			}
 			else
@@ -1469,19 +1468,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		if (bakedLight.isStaticAtBake && bakedLight.bakedStaticLightIndex >= 0)
 		{
-			VolumetricAdditionalLight volumetricLight = bakedLight.volumetricLight;
-			float staticCurrentScattering = volumetricLight.Scattering;
-			float staticCurrentIntensity = light.intensity;
-			float staticCurrentRange = Mathf.Max(light.range, 0.01f);
-			if (IsStaticLightStillEquivalentToBake(light, volumetricLight, bakedLight, staticCurrentRange, staticCurrentIntensity, staticCurrentScattering))
-			{
-				if (!TryGetAdditionalLightCandidateFromKnownComponents(light, volumetricLight, cameraPosition, fogDistance, fogMinHeight, fogMaxHeight, out anisotropy, out scattering, out radiusSq, out score, out lightPosition, out lightRange))
-					return false;
-
-				selectedAdditionalLightIndex = liveAdditionalLightIndex;
-				return true;
-			}
-
 			float range = bakedLight.range;
 			Vector3 bakedPosition = bakedLight.position;
 			float bakedMaxDistance = fogDistance + range;
