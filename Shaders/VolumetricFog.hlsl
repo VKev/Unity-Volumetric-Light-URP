@@ -207,7 +207,7 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
 		float bakedOcclusion = 1.0;
 #if SHADER_TARGET >= 45
 		UNITY_BRANCH
-		if (_BakedAdditionalLightOcclusionGridSize > 1 && bakedLightColor.w > 0.5)
+		if (_BakedAdditionalLightOcclusionGridSize > 1)
 		{
 			int gridSize = _BakedAdditionalLightOcclusionGridSize;
 			int gridSlice = gridSize * gridSize;
