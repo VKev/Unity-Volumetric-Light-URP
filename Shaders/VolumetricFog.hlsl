@@ -200,11 +200,38 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
 			int gridSlice = gridSize * gridSize;
 			float invRange = sqrt(max(bakedLightPos.w, 0.000001));
 			float3 lightLocal01 = saturate((-distToPos * invRange) * 0.5 + 0.5);
-			int gx = min(gridSize - 1, (int)(lightLocal01.x * gridSize));
-			int gy = min(gridSize - 1, (int)(lightLocal01.y * gridSize));
-			int gz = min(gridSize - 1, (int)(lightLocal01.z * gridSize));
-			int bakedOcclusionIndex = bakedLightIndex * (gridSlice * gridSize) + gx + gy * gridSize + gz * gridSlice;
-			bakedOcclusion = _BakedAdditionalLightOcclusionGrid[bakedOcclusionIndex];
+			float3 gridCoord = lightLocal01 * gridSize - 0.5;
+			int3 baseCoord = (int3)floor(gridCoord);
+			float3 lerpWeight = saturate(gridCoord - (float3)baseCoord);
+			int3 c0 = clamp(baseCoord, int3(0, 0, 0), int3(gridSize - 1, gridSize - 1, gridSize - 1));
+			int3 c1 = clamp(baseCoord + int3(1, 1, 1), int3(0, 0, 0), int3(gridSize - 1, gridSize - 1, gridSize - 1));
+			int lightBaseOffset = bakedLightIndex * (gridSlice * gridSize);
+
+			int i000 = lightBaseOffset + c0.x + c0.y * gridSize + c0.z * gridSlice;
+			int i100 = lightBaseOffset + c1.x + c0.y * gridSize + c0.z * gridSlice;
+			int i010 = lightBaseOffset + c0.x + c1.y * gridSize + c0.z * gridSlice;
+			int i110 = lightBaseOffset + c1.x + c1.y * gridSize + c0.z * gridSlice;
+			int i001 = lightBaseOffset + c0.x + c0.y * gridSize + c1.z * gridSlice;
+			int i101 = lightBaseOffset + c1.x + c0.y * gridSize + c1.z * gridSlice;
+			int i011 = lightBaseOffset + c0.x + c1.y * gridSize + c1.z * gridSlice;
+			int i111 = lightBaseOffset + c1.x + c1.y * gridSize + c1.z * gridSlice;
+
+			float v000 = _BakedAdditionalLightOcclusionGrid[i000];
+			float v100 = _BakedAdditionalLightOcclusionGrid[i100];
+			float v010 = _BakedAdditionalLightOcclusionGrid[i010];
+			float v110 = _BakedAdditionalLightOcclusionGrid[i110];
+			float v001 = _BakedAdditionalLightOcclusionGrid[i001];
+			float v101 = _BakedAdditionalLightOcclusionGrid[i101];
+			float v011 = _BakedAdditionalLightOcclusionGrid[i011];
+			float v111 = _BakedAdditionalLightOcclusionGrid[i111];
+
+			float vx00 = lerp(v000, v100, lerpWeight.x);
+			float vx10 = lerp(v010, v110, lerpWeight.x);
+			float vx01 = lerp(v001, v101, lerpWeight.x);
+			float vx11 = lerp(v011, v111, lerpWeight.x);
+			float vxy0 = lerp(vx00, vx10, lerpWeight.y);
+			float vxy1 = lerp(vx01, vx11, lerpWeight.y);
+			bakedOcclusion = lerp(vxy0, vxy1, lerpWeight.z);
 		}
 #endif
 

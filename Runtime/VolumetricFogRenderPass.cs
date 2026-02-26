@@ -159,7 +159,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private const int FroxelGridDepth = 24;
 	private const int FroxelMaxLightsPerCell = 24;
 	private const int FroxelCount = FroxelGridWidth * FroxelGridHeight * FroxelGridDepth;
-	private const int BakedAdditionalLightOcclusionGridSize = 10;
+	private const int BakedAdditionalLightOcclusionGridSize = 16;
 	private const int BakedAdditionalLightOcclusionVoxelCount = BakedAdditionalLightOcclusionGridSize * BakedAdditionalLightOcclusionGridSize * BakedAdditionalLightOcclusionGridSize;
 	private const int StaticOcclusionRaycastHitsCapacity = 64;
 	private const float StaticOcclusionRayBias = 0.01f;

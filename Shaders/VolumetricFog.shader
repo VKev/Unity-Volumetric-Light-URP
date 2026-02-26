@@ -20,6 +20,8 @@ Shader "Hidden/VolumetricFog"
 
             #include "./VolumetricFog.hlsl"
 
+            #pragma target 4.5
+
             #pragma multi_compile _ _FORWARD_PLUS
 
             #pragma multi_compile _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE _MAIN_LIGHT_SHADOWS_SCREEN
