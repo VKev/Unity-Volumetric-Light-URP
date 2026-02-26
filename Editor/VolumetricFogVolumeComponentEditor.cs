@@ -1,4 +1,5 @@
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEditor.Rendering;
 using UnityEngine;
 
@@ -34,8 +35,22 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 	private SerializedDataParameter downsampleMode;
 	private SerializedDataParameter maxSteps;
 	private SerializedDataParameter maxAdditionalLights;
+	private SerializedDataParameter froxelClusterMinLights;
+	private SerializedDataParameter enableAdaptiveStepCount;
+	private SerializedDataParameter adaptiveMinSteps;
+	private SerializedDataParameter adaptiveStepDensityScale;
+	private SerializedDataParameter lightingSampleStride;
+	private SerializedDataParameter enableTemporalReprojection;
+	private SerializedDataParameter temporalBlendFactor;
 	private SerializedDataParameter blurIterations;
 	private SerializedDataParameter transmittanceThreshold;
+	private SerializedDataParameter enableBaked3DMode;
+	private SerializedDataParameter baked3DAddRealtimeLights;
+	private SerializedDataParameter baked3DExtinctionTexture;
+	private SerializedDataParameter baked3DRadianceTexture;
+	private SerializedDataParameter baked3DVolumeCenter;
+	private SerializedDataParameter baked3DVolumeSize;
+	private SerializedDataParameter baked3DResolution;
 	private SerializedDataParameter enableStaticLightsBake;
 	private SerializedDataParameter staticLightsBakeRevision;
 	private SerializedDataParameter enabled;
@@ -77,8 +92,22 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		downsampleMode = Unpack(pf.Find(x => x.downsampleMode));
 		maxSteps = Unpack(pf.Find(x => x.maxSteps));
 		maxAdditionalLights = Unpack(pf.Find(x => x.maxAdditionalLights));
+		froxelClusterMinLights = Unpack(pf.Find(x => x.froxelClusterMinLights));
+		enableAdaptiveStepCount = Unpack(pf.Find(x => x.enableAdaptiveStepCount));
+		adaptiveMinSteps = Unpack(pf.Find(x => x.adaptiveMinSteps));
+		adaptiveStepDensityScale = Unpack(pf.Find(x => x.adaptiveStepDensityScale));
+		lightingSampleStride = Unpack(pf.Find(x => x.lightingSampleStride));
+		enableTemporalReprojection = Unpack(pf.Find(x => x.enableTemporalReprojection));
+		temporalBlendFactor = Unpack(pf.Find(x => x.temporalBlendFactor));
 		blurIterations = Unpack(pf.Find(x => x.blurIterations));
 		transmittanceThreshold = Unpack(pf.Find(x => x.transmittanceThreshold));
+		enableBaked3DMode = Unpack(pf.Find(x => x.enableBaked3DMode));
+		baked3DAddRealtimeLights = Unpack(pf.Find(x => x.baked3DAddRealtimeLights));
+		baked3DExtinctionTexture = Unpack(pf.Find(x => x.baked3DExtinctionTexture));
+		baked3DRadianceTexture = Unpack(pf.Find(x => x.baked3DRadianceTexture));
+		baked3DVolumeCenter = Unpack(pf.Find(x => x.baked3DVolumeCenter));
+		baked3DVolumeSize = Unpack(pf.Find(x => x.baked3DVolumeSize));
+		baked3DResolution = Unpack(pf.Find(x => x.baked3DResolution));
 		enableStaticLightsBake = Unpack(pf.Find(x => x.enableStaticLightsBake));
 		staticLightsBakeRevision = Unpack(pf.Find(x => x.staticLightsBakeRevision));
 		enabled = Unpack(pf.Find(x => x.enabled));
@@ -133,8 +162,38 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		PropertyField(downsampleMode);
 		PropertyField(maxSteps);
 		PropertyField(maxAdditionalLights);
+		PropertyField(froxelClusterMinLights);
+		PropertyField(enableAdaptiveStepCount);
+		bool adaptiveEnabled = enableAdaptiveStepCount.overrideState.boolValue && enableAdaptiveStepCount.value.boolValue;
+		if (adaptiveEnabled)
+		{
+			PropertyField(adaptiveMinSteps);
+			PropertyField(adaptiveStepDensityScale);
+		}
+		PropertyField(lightingSampleStride);
+		PropertyField(enableTemporalReprojection);
+		bool temporalEnabled = enableTemporalReprojection.overrideState.boolValue && enableTemporalReprojection.value.boolValue;
+		if (temporalEnabled)
+			PropertyField(temporalBlendFactor);
 		PropertyField(blurIterations);
 		PropertyField(transmittanceThreshold);
+		PropertyField(enableBaked3DMode);
+		bool baked3DEnabled = enableBaked3DMode.overrideState.boolValue && enableBaked3DMode.value.boolValue;
+		if (baked3DEnabled)
+		{
+			PropertyField(baked3DAddRealtimeLights);
+			PropertyField(baked3DExtinctionTexture);
+			PropertyField(baked3DRadianceTexture);
+			PropertyField(baked3DVolumeCenter);
+			PropertyField(baked3DVolumeSize);
+			PropertyField(baked3DResolution);
+			if (GUILayout.Button("Bake 3D", GUILayout.Height(22.0f)))
+			{
+				Bake3DForTargets();
+				serializedObject.Update();
+			}
+			EditorGUILayout.HelpBox("Baked 3D mode expects externally baked Texture3D assets for extinction and radiance. Runtime still raymarches camera-dependent integration.", MessageType.Info);
+		}
 
 		PropertyField(enableStaticLightsBake);
 		bool staticLightsBakeEnabled = enableStaticLightsBake.overrideState.boolValue && enableStaticLightsBake.value.boolValue;
@@ -157,6 +216,26 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		PropertyField(enabled);
 		
 		PropertyField(renderPassEvent);
+	}
+
+	#endregion
+
+	#region Private Methods
+
+	private void Bake3DForTargets()
+	{
+		for (int i = 0; i < targets.Length; ++i)
+		{
+			VolumetricFogVolumeComponent volume = targets[i] as VolumetricFogVolumeComponent;
+			if (volume == null)
+				continue;
+
+			VolumetricFogBaked3DUtility.Bake(volume);
+			EditorUtility.SetDirty(volume);
+		}
+
+		AssetDatabase.SaveAssets();
+		EditorSceneManager.MarkAllScenesDirty();
 	}
 
 	#endregion

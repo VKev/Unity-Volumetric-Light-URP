@@ -29,6 +29,17 @@ float _APVContributionWeight;
 float _TransmittanceThreshold;
 float3 _Tint;
 int _MaxSteps;
+int _AdaptiveMinSteps;
+float _AdaptiveStepDensityScale;
+int _LightingSampleStride;
+int _Baked3DMode;
+int _Baked3DAddRealtimeLights;
+float3 _Baked3DVolumeCenter;
+float3 _Baked3DVolumeInvSize;
+TEXTURE3D(_Baked3DExtinctionTexture);
+SAMPLER(sampler_Baked3DExtinctionTexture);
+TEXTURE3D(_Baked3DRadianceTexture);
+SAMPLER(sampler_Baked3DRadianceTexture);
 
 #if SHADER_TARGET >= 45
 StructuredBuffer<float> _Anisotropies;
@@ -137,6 +148,23 @@ float GetFogDensity(float posWSy)
     t = lerp(t, 0.0, posWSy < _GroundHeight);
 
     return _Density * t;
+}
+
+// Samples baked volumetric 3D field at world position.
+bool TrySampleBaked3DField(float3 posWS, out float extinction, out float3 radiance)
+{
+    float3 uvw = (posWS - _Baked3DVolumeCenter) * _Baked3DVolumeInvSize + 0.5;
+    bool inside = all(uvw >= 0.0) && all(uvw <= 1.0);
+    if (!inside)
+    {
+        extinction = 0.0;
+        radiance = float3(0.0, 0.0, 0.0);
+        return false;
+    }
+
+    extinction = SAMPLE_TEXTURE3D_LOD(_Baked3DExtinctionTexture, sampler_Baked3DExtinctionTexture, uvw, 0).r;
+    radiance = SAMPLE_TEXTURE3D_LOD(_Baked3DRadianceTexture, sampler_Baked3DRadianceTexture, uvw, 0).rgb;
+    return true;
 }
 
 // Gets the GI evaluation from the adaptive probe volume at one raymarch step.
@@ -384,17 +412,29 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         return float4(0.0, 0.0, 0.0, 1.0);
 
     float3 roNearPlane = ro + rd * iniOffsetToNearPlane;
-    float stepLength = maxRaymarchDistance / (float)_MaxSteps;
+    int maxSteps = _MaxSteps;
+#if _ADAPTIVE_STEP_COUNT
+    float densityNear = GetFogDensity(roNearPlane.y);
+    float densityFar = GetFogDensity((roNearPlane + rd * maxRaymarchDistance).y);
+    float densityHint = max(densityNear, densityFar);
+    float adaptiveT = saturate(densityHint * _AdaptiveStepDensityScale);
+    maxSteps = max(_AdaptiveMinSteps, (int)round(lerp((float)_AdaptiveMinSteps, (float)_MaxSteps, adaptiveT)));
+#endif
+
+    float stepLength = maxRaymarchDistance / (float)maxSteps;
     float jitter = stepLength * InterleavedGradientNoise(positionCS, _FrameCount);
+    int lightingSampleStride = max(_LightingSampleStride, 1);
 
     half phaseMainLight = GetMainLightPhase(rdPhase);
     float minusStepLengthTimesAbsortion = -stepLength * _Absortion;
                 
     float3 volumetricFogColor = float3(0.0, 0.0, 0.0);
     half transmittance = 1.0;
+    half3 cachedMainLightColor = half3(0.0, 0.0, 0.0);
+    half3 cachedAdditionalLightsColor = half3(0.0, 0.0, 0.0);
 
     UNITY_LOOP
-    for (int i = 0; i < _MaxSteps; ++i)
+    for (int i = 0; i < maxSteps; ++i)
     {
         float dist = jitter + i * stepLength;
         
@@ -408,6 +448,23 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         // In those edge cases, it looks so much better, specially when near plane is higher than the minimum (0.01) allowed.
         float3 currPosWS = roNearPlane + rd * dist;
         float density = GetFogDensity(currPosWS.y);
+        half3 bakedRadiance = half3(0.0, 0.0, 0.0);
+        UNITY_BRANCH
+        if (_Baked3DMode > 0)
+        {
+            float bakedExtinction = 0.0;
+            float3 bakedRadianceSample = float3(0.0, 0.0, 0.0);
+            if (TrySampleBaked3DField(currPosWS, bakedExtinction, bakedRadianceSample))
+            {
+                // Baked extinction is converted back to equivalent density for step attenuation.
+                density = bakedExtinction / max(_Absortion, 0.0001);
+                bakedRadiance = (half3)bakedRadianceSample;
+            }
+            else
+            {
+                density = 0.0;
+            }
+        }
                     
         UNITY_BRANCH
         if (density <= 0.0)
@@ -417,11 +474,27 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         transmittance *= stepAttenuation;
 
         half3 apvColor = (half3)GetStepAdaptiveProbeVolumeEvaluation(uv, currPosWS, density);
-        half3 mainLightColor = (half3)GetStepMainLightColor(currPosWS, phaseMainLight, density);
-        half3 additionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density);
+        UNITY_BRANCH
+        if (lightingSampleStride <= 1 || (i % lightingSampleStride) == 0)
+        {
+            UNITY_BRANCH
+            if (_Baked3DMode > 0 && _Baked3DAddRealtimeLights <= 0)
+            {
+                cachedMainLightColor = half3(0.0, 0.0, 0.0);
+                cachedAdditionalLightsColor = half3(0.0, 0.0, 0.0);
+            }
+            else
+            {
+                cachedMainLightColor = (half3)GetStepMainLightColor(currPosWS, phaseMainLight, density);
+                cachedAdditionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density);
+            }
+        }
+
+        half3 mainLightColor = cachedMainLightColor;
+        half3 additionalLightsColor = cachedAdditionalLightsColor;
         
         // TODO: Additional contributions? Reflection probes, etc...
-        half3 stepColor = apvColor + mainLightColor + additionalLightsColor;
+        half3 stepColor = apvColor + mainLightColor + additionalLightsColor + bakedRadiance;
         volumetricFogColor += ((float3)stepColor * (transmittance * stepLength));
 
         UNITY_BRANCH
