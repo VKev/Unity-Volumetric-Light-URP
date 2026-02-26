@@ -30,10 +30,17 @@ float _TransmittanceThreshold;
 float3 _Tint;
 int _MaxSteps;
 
+#if SHADER_TARGET >= 45
+StructuredBuffer<float> _Anisotropies;
+StructuredBuffer<float> _Scatterings;
+StructuredBuffer<float> _RadiiSq;
+StructuredBuffer<int> _AdditionalLightIndices;
+#else
 float _Anisotropies[MAX_VISIBLE_LIGHTS + 1];
 float _Scatterings[MAX_VISIBLE_LIGHTS + 1];
 float _RadiiSq[MAX_VISIBLE_LIGHTS];
 float _AdditionalLightIndices[MAX_VISIBLE_LIGHTS];
+#endif
 int _BakedMainLightEnabled;
 float3 _BakedMainLightDirection;
 float3 _BakedMainLightColor;
@@ -181,12 +188,17 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
 	if (scattering <= 0.0)
 		return float3(0.0, 0.0, 0.0);
 
+#if SHADER_TARGET >= 45
+	int additionalLightIndex = _AdditionalLightIndices[compactLightIndex];
+#else
 	int additionalLightIndex = (int)_AdditionalLightIndices[compactLightIndex];
+#endif
 	UNITY_BRANCH
 	if (additionalLightIndex < 0)
 	{
 		int bakedLightIndex = -additionalLightIndex - 1;
 		float4 bakedLightPos = _BakedAdditionalLightPositions[bakedLightIndex];
+		float4 bakedSpotData = _BakedAdditionalLightSpotData[bakedLightIndex];
 		float3 distToPos = bakedLightPos.xyz - currPosWS;
 		float distToPosMagnitudeSq = max(dot(distToPos, distToPos), 0.0001);
 		float3 lightDirection = distToPos * rsqrt(distToPosMagnitudeSq);
@@ -198,7 +210,7 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
 		{
 			int gridSize = _BakedAdditionalLightOcclusionGridSize;
 			int gridSlice = gridSize * gridSize;
-			float invRange = sqrt(max(bakedLightPos.w, 0.000001));
+			float invRange = max(bakedLightPos.w, 0.000001);
 			float3 lightLocal01 = saturate((-distToPos * invRange) * 0.5 + 0.5);
 			float3 gridCoord = lightLocal01 * gridSize - 0.5;
 			int3 baseCoord = (int3)floor(gridCoord);
@@ -235,11 +247,10 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
 		}
 #endif
 
-		float distanceAttenuation = saturate(1.0 - distToPosMagnitudeSq * bakedLightPos.w);
+		float distanceAttenuation = saturate(1.0 - distToPosMagnitudeSq * bakedSpotData.w);
 		distanceAttenuation *= distanceAttenuation;
 		distanceAttenuation *= saturate(bakedOcclusion);
 
-		float4 bakedSpotData = _BakedAdditionalLightSpotData[bakedLightIndex];
 		UNITY_BRANCH
 		if (bakedSpotData.x > 0.5)
 		{

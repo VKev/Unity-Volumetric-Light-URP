@@ -41,9 +41,15 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		public float radiusSq;
 		public Vector3 position;
 		public float range;
+		public float rangeSq;
+		public float invRange;
+		public float invRangeSq;
+		public float minY;
+		public float maxY;
 		public float intensity;
 		public float spotAngle;
 		public float spotFactor;
+		public float scoreDistanceScale;
 		public bool isSpotAtBake;
 		public Vector3 color;
 		public Vector3 spotDirection;
@@ -171,12 +177,13 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly float[] Anisotropies = new float[LightsParametersLength];
 	private static readonly float[] Scatterings = new float[LightsParametersLength];
 	private static readonly float[] RadiiSq = new float[MaxVisibleAdditionalLights];
-	private static readonly float[] AdditionalLightIndices = new float[MaxVisibleAdditionalLights];
+	private static readonly int[] AdditionalLightIndices = new int[MaxVisibleAdditionalLights];
 
 	private static readonly int[] SelectedAdditionalIndices = new int[MaxVisibleAdditionalLights];
 	private static readonly float[] SelectedAnisotropies = new float[MaxVisibleAdditionalLights];
 	private static readonly float[] SelectedScatterings = new float[MaxVisibleAdditionalLights];
 	private static readonly float[] SelectedRadiiSq = new float[MaxVisibleAdditionalLights];
+	private static readonly float[] AdditionalLightIndicesFloat = new float[MaxVisibleAdditionalLights];
 	private static readonly float[] SelectedScores = new float[MaxVisibleAdditionalLights];
 	private static readonly Vector3[] SelectedLightPositions = new Vector3[MaxVisibleAdditionalLights];
 	private static readonly float[] SelectedLightRanges = new float[MaxVisibleAdditionalLights];
@@ -194,6 +201,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static ComputeBuffer froxelMetaBuffer;
 	private static ComputeBuffer froxelLightIndicesBuffer;
 	private static ComputeBuffer bakedAdditionalLightOcclusionGridBuffer;
+	private static ComputeBuffer anisotropiesBuffer;
+	private static ComputeBuffer scatteringsBuffer;
+	private static ComputeBuffer radiiSqBuffer;
+	private static ComputeBuffer additionalLightIndicesBuffer;
 
 	private int downsampleDepthPassIndex;
 	private int volumetricFogRenderPassIndex;
@@ -681,12 +692,49 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (enableMainLightContribution || effectiveAdditionalLightsCount > 0)
 		{
 			bool shouldUploadLightArrays = !isMaterialStateInitialized || lightsHash != cachedLightsHash || staticLightsBakeDataChanged;
-			if (shouldUploadLightArrays)
+			bool supportsStructuredLightBuffers = SystemInfo.graphicsShaderLevel >= 45;
+			if (supportsStructuredLightBuffers)
+			{
+				EnsureLightParameterBuffersAllocated();
+				if (shouldUploadLightArrays)
+				{
+					if (anisotropiesBuffer != null)
+						anisotropiesBuffer.SetData(Anisotropies);
+					if (scatteringsBuffer != null)
+						scatteringsBuffer.SetData(Scatterings);
+					if (radiiSqBuffer != null)
+						radiiSqBuffer.SetData(RadiiSq);
+					if (additionalLightIndicesBuffer != null)
+						additionalLightIndicesBuffer.SetData(AdditionalLightIndices);
+					if (enableStaticLightsBake && hasValidStaticLightsBake && bakedStaticLightsCount > 0)
+					{
+						volumetricFogMaterial.SetVectorArray(BakedAdditionalLightPositionsArrayId, BakedAdditionalLightPositions);
+						volumetricFogMaterial.SetVectorArray(BakedAdditionalLightColorsArrayId, BakedAdditionalLightColors);
+						volumetricFogMaterial.SetVectorArray(BakedAdditionalLightDirectionsArrayId, BakedAdditionalLightDirections);
+						volumetricFogMaterial.SetVectorArray(BakedAdditionalLightSpotDataArrayId, BakedAdditionalLightSpotData);
+						if (enableBakedAdditionalLightOcclusionGrid)
+						{
+							EnsureBakedAdditionalLightOcclusionBufferAllocated();
+							if (bakedAdditionalLightOcclusionGridBuffer != null)
+							{
+								bakedAdditionalLightOcclusionGridBuffer.SetData(BakedAdditionalLightOcclusionGrid);
+								volumetricFogMaterial.SetBuffer(BakedAdditionalLightOcclusionGridBufferId, bakedAdditionalLightOcclusionGridBuffer);
+							}
+						}
+					}
+					cachedLightsHash = lightsHash;
+				}
+
+				BindLightParameterBuffers(volumetricFogMaterial);
+			}
+			else if (shouldUploadLightArrays)
 			{
 				volumetricFogMaterial.SetFloatArray(AnisotropiesArrayId, Anisotropies);
 				volumetricFogMaterial.SetFloatArray(ScatteringsArrayId, Scatterings);
 				volumetricFogMaterial.SetFloatArray(RadiiSqArrayId, RadiiSq);
-				volumetricFogMaterial.SetFloatArray(AdditionalLightIndicesArrayId, AdditionalLightIndices);
+				for (int i = 0; i < MaxVisibleAdditionalLights; ++i)
+					AdditionalLightIndicesFloat[i] = AdditionalLightIndices[i];
+				volumetricFogMaterial.SetFloatArray(AdditionalLightIndicesArrayId, AdditionalLightIndicesFloat);
 				if (enableStaticLightsBake && hasValidStaticLightsBake && bakedStaticLightsCount > 0)
 				{
 					volumetricFogMaterial.SetVectorArray(BakedAdditionalLightPositionsArrayId, BakedAdditionalLightPositions);
@@ -839,10 +887,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 			if (bakedStaticLightIndex >= 0)
 			{
-				BakedAdditionalLightPositions[bakedStaticLightIndex] = new Vector4(bakedData.position.x, bakedData.position.y, bakedData.position.z, 1.0f / Mathf.Max(bakedData.range * bakedData.range, 0.0001f));
+				BakedAdditionalLightPositions[bakedStaticLightIndex] = new Vector4(bakedData.position.x, bakedData.position.y, bakedData.position.z, bakedData.invRange);
 				BakedAdditionalLightColors[bakedStaticLightIndex] = new Vector4(bakedData.color.x, bakedData.color.y, bakedData.color.z, 0.0f);
 				BakedAdditionalLightDirections[bakedStaticLightIndex] = new Vector4(bakedData.spotDirection.x, bakedData.spotDirection.y, bakedData.spotDirection.z, 0.0f);
-				BakedAdditionalLightSpotData[bakedStaticLightIndex] = new Vector4(bakedData.isSpotAtBake ? 1.0f : 0.0f, bakedData.spotCosOuter, bakedData.spotInvCosRange, 0.0f);
+				BakedAdditionalLightSpotData[bakedStaticLightIndex] = new Vector4(bakedData.isSpotAtBake ? 1.0f : 0.0f, bakedData.spotCosOuter, bakedData.spotInvCosRange, bakedData.invRangeSq);
 				BakeStaticAdditionalLightOcclusionGrid(bakedStaticLightIndex, bakedData);
 			}
 		}
@@ -939,12 +987,18 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static BakedAdditionalLightData BuildBakedAdditionalLightData(Light light, VolumetricAdditionalLight volumetricLight, bool isStaticLight, int bakedStaticLightIndex)
 	{
 		float range = Mathf.Max(light.range, 0.01f);
+		float rangeSq = range * range;
+		float invRange = 1.0f / range;
+		float invRangeSq = 1.0f / Mathf.Max(rangeSq, 0.0001f);
+		Vector3 lightPosition = light.transform.position;
 		Color linearColor = light.color.linear;
 		bool isSpot = light.type == LightType.Spot;
 		float spotAngle = isSpot ? light.spotAngle : 0.0f;
 		float spotCosOuter = -1.0f;
 		float spotInvCosRange = 0.0f;
 		Vector3 spotDirection = Vector3.forward;
+		float intensity = light.intensity;
+		float spotFactor = isSpot ? ComputeSpotLightScoreFactor(spotAngle) : 1.0f;
 		if (isSpot)
 		{
 			float cosOuter = Mathf.Cos(0.5f * Mathf.Deg2Rad * spotAngle);
@@ -964,13 +1018,19 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			anisotropy = volumetricLight.Anisotropy,
 			scattering = volumetricLight.Scattering,
 			radiusSq = volumetricLight.Radius * volumetricLight.Radius,
-			position = light.transform.position,
+			position = lightPosition,
 			range = range,
-			intensity = light.intensity,
+			rangeSq = rangeSq,
+			invRange = invRange,
+			invRangeSq = invRangeSq,
+			minY = lightPosition.y - range,
+			maxY = lightPosition.y + range,
+			intensity = intensity,
 			spotAngle = spotAngle,
-			spotFactor = isSpot ? ComputeSpotLightScoreFactor(spotAngle) : 1.0f,
+			spotFactor = spotFactor,
+			scoreDistanceScale = rangeSq * intensity * spotFactor,
 			isSpotAtBake = isSpot,
-			color = new Vector3(linearColor.r, linearColor.g, linearColor.b) * light.intensity,
+			color = new Vector3(linearColor.r, linearColor.g, linearColor.b) * intensity,
 			spotDirection = spotDirection,
 			spotCosOuter = spotCosOuter,
 			spotInvCosRange = spotInvCosRange
@@ -1248,9 +1308,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			if (bakedDistanceSq > bakedMaxDistance * bakedMaxDistance)
 				return false;
 
-			float bakedLightMinY = bakedPosition.y - range;
-			float bakedLightMaxY = bakedPosition.y + range;
-			if (bakedLightMaxY < fogMinHeight || bakedLightMinY > fogMaxHeight)
+			if (bakedLight.maxY < fogMinHeight || bakedLight.minY > fogMaxHeight)
 				return false;
 
 			anisotropy = bakedLight.anisotropy;
@@ -1259,8 +1317,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			lightPosition = bakedPosition;
 			lightRange = range;
 
-			float bakedDistanceWeight = (range * range) / Mathf.Max(bakedDistanceSq, 1.0f);
-			score = scattering * bakedLight.intensity * bakedDistanceWeight * bakedLight.spotFactor;
+			score = scattering * bakedLight.scoreDistanceScale / Mathf.Max(bakedDistanceSq, 1.0f);
 			if (score <= 0.0f)
 				return false;
 
@@ -1644,6 +1701,54 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		{
 			bakedAdditionalLightOcclusionGridBuffer?.Release();
 			bakedAdditionalLightOcclusionGridBuffer = new ComputeBuffer(count, sizeof(float), ComputeBufferType.Structured);
+		}
+	}
+
+	/// <summary>
+	/// Ensures light parameter structured buffers are allocated.
+	/// </summary>
+	private static void EnsureLightParameterBuffersAllocated()
+	{
+		EnsureStructuredBuffer(ref anisotropiesBuffer, LightsParametersLength, sizeof(float));
+		EnsureStructuredBuffer(ref scatteringsBuffer, LightsParametersLength, sizeof(float));
+		EnsureStructuredBuffer(ref radiiSqBuffer, MaxVisibleAdditionalLights, sizeof(float));
+		EnsureStructuredBuffer(ref additionalLightIndicesBuffer, MaxVisibleAdditionalLights, sizeof(int));
+	}
+
+	/// <summary>
+	/// Binds light parameter structured buffers to the material.
+	/// </summary>
+	/// <param name="material"></param>
+	private static void BindLightParameterBuffers(Material material)
+	{
+		if (material == null)
+			return;
+
+		if (anisotropiesBuffer != null)
+			material.SetBuffer(AnisotropiesArrayId, anisotropiesBuffer);
+
+		if (scatteringsBuffer != null)
+			material.SetBuffer(ScatteringsArrayId, scatteringsBuffer);
+
+		if (radiiSqBuffer != null)
+			material.SetBuffer(RadiiSqArrayId, radiiSqBuffer);
+
+		if (additionalLightIndicesBuffer != null)
+			material.SetBuffer(AdditionalLightIndicesArrayId, additionalLightIndicesBuffer);
+	}
+
+	/// <summary>
+	/// Ensures a structured buffer is allocated with the expected layout.
+	/// </summary>
+	/// <param name="buffer"></param>
+	/// <param name="count"></param>
+	/// <param name="stride"></param>
+	private static void EnsureStructuredBuffer(ref ComputeBuffer buffer, int count, int stride)
+	{
+		if (buffer == null || buffer.count != count || buffer.stride != stride)
+		{
+			buffer?.Release();
+			buffer = new ComputeBuffer(count, stride, ComputeBufferType.Structured);
 		}
 	}
 
@@ -2331,6 +2436,18 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		bakedAdditionalLightOcclusionGridBuffer?.Release();
 		bakedAdditionalLightOcclusionGridBuffer = null;
+
+		anisotropiesBuffer?.Release();
+		anisotropiesBuffer = null;
+
+		scatteringsBuffer?.Release();
+		scatteringsBuffer = null;
+
+		radiiSqBuffer?.Release();
+		radiiSqBuffer = null;
+
+		additionalLightIndicesBuffer?.Release();
+		additionalLightIndicesBuffer = null;
 	}
 
 #if UNITY_6000_0_OR_NEWER
