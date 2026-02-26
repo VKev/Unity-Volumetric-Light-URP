@@ -86,10 +86,8 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	[Tooltip("When greater than zero, raymarching stops early once transmittance falls below this threshold. This improves performance in dense fog.")]
 	public ClampedFloatParameter transmittanceThreshold = new ClampedFloatParameter(0.0f, 0.0f, 1.0f);
 	[Header("Baked 3D Field")]
-	[Tooltip("When enabled and both baked textures are assigned, fog integrates baked 3D density/radiance fields inside the configured world volume.")]
+	[Tooltip("When enabled and both baked textures are assigned, fog uses baked 3D density/radiance from static lights/objects. Realtime light changes are ignored until rebake.")]
 	public BoolParameter enableBaked3DMode = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
-	[Tooltip("When enabled in Baked 3D mode, realtime lighting is kept for visual parity (baked extinction still applies). Disable to use fully baked radiance (faster but approximate).")]
-	public BoolParameter baked3DAddRealtimeLights = new BoolParameter(true, BoolParameter.DisplayType.Checkbox, true);
 	[Tooltip("Baked 3D extinction (density * absorption) texture.")]
 	public TextureParameter baked3DExtinctionTexture = new TextureParameter(null);
 	[Tooltip("Baked 3D in-scattered radiance texture (HDR).")]
@@ -100,11 +98,6 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	public Vector3Parameter baked3DVolumeSize = new Vector3Parameter(new Vector3(128.0f, 64.0f, 128.0f));
 	[Tooltip("Voxel resolution per axis used when baking 3D textures from the inspector Bake 3D button.")]
 	public ClampedIntParameter baked3DResolution = new ClampedIntParameter(64, 16, 256);
-	[Header("Static Light Bake")]
-	[Tooltip("When enabled, static lights (GameObject Static or Light Mode Mixed/Baked) and static-object occlusion (from static colliders) use baked snapshot data until Bake Revision changes. Dynamic lights and camera-dependent computations remain live.")]
-	public BoolParameter enableStaticLightsBake = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
-	[Tooltip("Internal bake stamp. The inspector Bake button increases this to refresh cached static light data.")]
-	public MinIntParameter staticLightsBakeRevision = new MinIntParameter(0, 0);
 	[Tooltip("Disabling this will completely remove any feature from the volumetric fog from being rendered at all.")]
 	public BoolParameter enabled = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
 

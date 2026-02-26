@@ -45,14 +45,11 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 	private SerializedDataParameter blurIterations;
 	private SerializedDataParameter transmittanceThreshold;
 	private SerializedDataParameter enableBaked3DMode;
-	private SerializedDataParameter baked3DAddRealtimeLights;
 	private SerializedDataParameter baked3DExtinctionTexture;
 	private SerializedDataParameter baked3DRadianceTexture;
 	private SerializedDataParameter baked3DVolumeCenter;
 	private SerializedDataParameter baked3DVolumeSize;
 	private SerializedDataParameter baked3DResolution;
-	private SerializedDataParameter enableStaticLightsBake;
-	private SerializedDataParameter staticLightsBakeRevision;
 	private SerializedDataParameter enabled;
 	
 	private SerializedDataParameter renderPassEvent;
@@ -102,14 +99,11 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		blurIterations = Unpack(pf.Find(x => x.blurIterations));
 		transmittanceThreshold = Unpack(pf.Find(x => x.transmittanceThreshold));
 		enableBaked3DMode = Unpack(pf.Find(x => x.enableBaked3DMode));
-		baked3DAddRealtimeLights = Unpack(pf.Find(x => x.baked3DAddRealtimeLights));
 		baked3DExtinctionTexture = Unpack(pf.Find(x => x.baked3DExtinctionTexture));
 		baked3DRadianceTexture = Unpack(pf.Find(x => x.baked3DRadianceTexture));
 		baked3DVolumeCenter = Unpack(pf.Find(x => x.baked3DVolumeCenter));
 		baked3DVolumeSize = Unpack(pf.Find(x => x.baked3DVolumeSize));
 		baked3DResolution = Unpack(pf.Find(x => x.baked3DResolution));
-		enableStaticLightsBake = Unpack(pf.Find(x => x.enableStaticLightsBake));
-		staticLightsBakeRevision = Unpack(pf.Find(x => x.staticLightsBakeRevision));
 		enabled = Unpack(pf.Find(x => x.enabled));
 		
 		renderPassEvent = Unpack(pf.Find(x => x.renderPassEvent));
@@ -181,7 +175,6 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		bool baked3DEnabled = enableBaked3DMode.overrideState.boolValue && enableBaked3DMode.value.boolValue;
 		if (baked3DEnabled)
 		{
-			PropertyField(baked3DAddRealtimeLights);
 			PropertyField(baked3DExtinctionTexture);
 			PropertyField(baked3DRadianceTexture);
 			PropertyField(baked3DVolumeCenter);
@@ -192,25 +185,7 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 				Bake3DForTargets();
 				serializedObject.Update();
 			}
-			EditorGUILayout.HelpBox("For no visual change, keep Add Realtime Lights enabled (hybrid mode: baked extinction + realtime lighting). Disable it for pure baked radiance mode (faster but approximate).", MessageType.Info);
-		}
-
-		PropertyField(enableStaticLightsBake);
-		bool staticLightsBakeEnabled = enableStaticLightsBake.overrideState.boolValue && enableStaticLightsBake.value.boolValue;
-		if (staticLightsBakeEnabled)
-		{
-			EditorGUILayout.Space(2.0f);
-			if (GUILayout.Button("Bake", GUILayout.Height(22.0f)))
-			{
-				Undo.RecordObjects(targets, "Bake Volumetric Static Lights");
-				staticLightsBakeRevision.overrideState.boolValue = true;
-				staticLightsBakeRevision.value.intValue = Mathf.Max(0, staticLightsBakeRevision.value.intValue + 1);
-				serializedObject.ApplyModifiedProperties();
-				for (int i = 0; i < targets.Length; ++i)
-					EditorUtility.SetDirty(targets[i]);
-			}
-
-			EditorGUILayout.HelpBox("Static lights (GameObject Static or Light Mode Mixed/Baked) and static-object occlusion from static colliders use baked snapshot values until Bake Revision changes. Dynamic lights and camera-dependent behavior stay live.", MessageType.Info);
+			EditorGUILayout.HelpBox("Bake 3D includes static main/additional lights and static-object occlusion only. Moving lights/static objects will not update until you bake again. Camera movement is supported.", MessageType.Info);
 		}
 
 		PropertyField(enabled);

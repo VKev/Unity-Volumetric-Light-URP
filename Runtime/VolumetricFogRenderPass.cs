@@ -318,7 +318,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		InitializePassesIndices();
 		ResetMaterialStateCache();
-		ResetStaticLightsBakeCache();
 		ResetTemporalHistoryState();
 	}
 
@@ -700,14 +699,13 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (fogVolume == null)
 			return;
 
-		bool enableStaticLightsBake = fogVolume.enableStaticLightsBake.value;
 		bool enableBaked3DMode = fogVolume.enableBaked3DMode.value;
 		Texture baked3DExtinctionTexture = fogVolume.baked3DExtinctionTexture.value;
 		Texture baked3DRadianceTexture = fogVolume.baked3DRadianceTexture.value;
 		bool hasValidBaked3DTextures = enableBaked3DMode && baked3DExtinctionTexture != null && baked3DRadianceTexture != null;
-		bool baked3DAddRealtimeLights = !hasValidBaked3DTextures || fogVolume.baked3DAddRealtimeLights.value;
+		bool baked3DAddRealtimeLights = !hasValidBaked3DTextures;
 		bool excludeStaticLightsFromRealtime = false;
-		bool useOnlyBaked3DLighting = hasValidBaked3DTextures && !baked3DAddRealtimeLights;
+		bool useOnlyBaked3DLighting = hasValidBaked3DTextures;
 		bool enableMainLightContribution = fogVolume.enableMainLightContribution.value && fogVolume.scattering.value > 0.0f && mainLightIndex > -1;
 		bool enableAdditionalLightsContribution = fogVolume.enableAdditionalLightsContribution.value && additionalLightsCount > 0 && fogVolume.maxAdditionalLights.value > 0;
 		if (useOnlyBaked3DLighting)
@@ -715,7 +713,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			enableMainLightContribution = false;
 			enableAdditionalLightsContribution = false;
 		}
-		bool staticLightsBakeDataChanged = false;
 
 		volumetricFogMaterial.SetInteger(Baked3DModeId, hasValidBaked3DTextures ? 1 : 0);
 		volumetricFogMaterial.SetInteger(Baked3DAddRealtimeLightsId, baked3DAddRealtimeLights ? 1 : 0);
@@ -729,40 +726,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			volumetricFogMaterial.SetVector(Baked3DVolumeInvSizeId, new Vector4(bakedVolumeInvSize.x, bakedVolumeInvSize.y, bakedVolumeInvSize.z, 0.0f));
 		}
 
-		if (enableStaticLightsBake)
-		{
-			int staticLightsBakeRevision = fogVolume.staticLightsBakeRevision.value;
-			if (!hasValidStaticLightsBake || cachedStaticLightsBakeRevision != staticLightsBakeRevision)
-			{
-				BakeStaticLightsData(mainLightIndex, visibleLights);
-				staticLightsBakeDataChanged = true;
-			}
-
-			cachedStaticLightsBakeRevision = staticLightsBakeRevision;
-		}
-
-		if (enableStaticLightsBake && hasValidStaticLightsBake && (bakedStaticLightsCount > 0 || bakedMainLight.isValid))
-		{
-			bool shouldCheckStaticSceneHash = !Application.isPlaying || Time.frameCount >= nextStaticSceneHashCheckFrame;
-			if (shouldCheckStaticSceneHash)
-			{
-				hasStaticSceneStateChangedSinceBake = ComputeStaticSceneBakeHash() != bakedStaticSceneHash;
-				if (Application.isPlaying)
-					nextStaticSceneHashCheckFrame = Time.frameCount + StaticSceneHashCheckIntervalFrames;
-			}
-		}
-		else
-		{
-			hasStaticSceneStateChangedSinceBake = false;
-		}
-
 		int lightsHash = 0;
 		int effectiveAdditionalLightsCount = 0;
 		if (enableMainLightContribution || enableAdditionalLightsContribution)
 		{
-			effectiveAdditionalLightsCount = enableStaticLightsBake
-				? UpdateBakedLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, excludeStaticLightsFromRealtime, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash)
-				: UpdateLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, excludeStaticLightsFromRealtime, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
+			effectiveAdditionalLightsCount = UpdateLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, excludeStaticLightsFromRealtime, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
 		}
 
 		enableAdditionalLightsContribution &= effectiveAdditionalLightsCount > 0;
@@ -811,16 +779,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			cachedAdaptiveStepCountEnabled = enableAdaptiveStepCount;
 		}
 
-		bool freezeMainLightToBake = enableStaticLightsBake && hasValidStaticLightsBake && enableMainLightContribution && bakedMainLight.isValid;
-		freezeMainLightToBake &= !IsMainLightStillEquivalentToBake(mainLightIndex, visibleLights);
-		volumetricFogMaterial.SetInteger(BakedMainLightEnabledId, freezeMainLightToBake ? 1 : 0);
-		if (freezeMainLightToBake)
-		{
-			volumetricFogMaterial.SetVector(BakedMainLightDirectionId, new Vector4(bakedMainLight.direction.x, bakedMainLight.direction.y, bakedMainLight.direction.z, 0.0f));
-			volumetricFogMaterial.SetColor(BakedMainLightColorId, new Color(bakedMainLight.color.x, bakedMainLight.color.y, bakedMainLight.color.z, 1.0f));
-		}
-		bool enableBakedAdditionalLightOcclusionGrid = enableStaticLightsBake && hasValidStaticLightsBake && bakedStaticLightsCount > 0 && SystemInfo.graphicsShaderLevel >= 45;
-		volumetricFogMaterial.SetInteger(BakedAdditionalLightOcclusionGridSizeId, enableBakedAdditionalLightOcclusionGrid ? BakedAdditionalLightOcclusionGridSize : 0);
+		volumetricFogMaterial.SetInteger(BakedMainLightEnabledId, 0);
+		volumetricFogMaterial.SetInteger(BakedAdditionalLightOcclusionGridSizeId, 0);
 
 		volumetricFogMaterial.SetInteger(FrameCountId, Time.renderedFrameCount % 64);
 		SetIntIfChanged(volumetricFogMaterial, CustomAdditionalLightsCountId, effectiveAdditionalLightsCount, ref cachedAdditionalLightsCount);
@@ -846,8 +806,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		if (enableMainLightContribution || effectiveAdditionalLightsCount > 0)
 		{
-			bool shouldUploadLightArrays = !isMaterialStateInitialized || lightsHash != cachedLightsHash || staticLightsBakeDataChanged;
-			bool shouldUploadStaticBakeData = enableStaticLightsBake && hasValidStaticLightsBake && bakedStaticLightsCount > 0 && (!isMaterialStateInitialized || staticLightsBakeDataChanged);
+			bool shouldUploadLightArrays = !isMaterialStateInitialized || lightsHash != cachedLightsHash;
 			EnsureLightParameterBuffersAllocated();
 			if (shouldUploadLightArrays)
 			{
@@ -866,23 +825,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 				cachedLightsHash = lightsHash;
 			}
 
-			if (shouldUploadStaticBakeData)
-			{
-				volumetricFogMaterial.SetVectorArray(BakedAdditionalLightPositionsArrayId, BakedAdditionalLightPositions);
-				volumetricFogMaterial.SetVectorArray(BakedAdditionalLightColorsArrayId, BakedAdditionalLightColors);
-				volumetricFogMaterial.SetVectorArray(BakedAdditionalLightDirectionsArrayId, BakedAdditionalLightDirections);
-				volumetricFogMaterial.SetVectorArray(BakedAdditionalLightSpotDataArrayId, BakedAdditionalLightSpotData);
-				if (enableBakedAdditionalLightOcclusionGrid)
-				{
-					EnsureBakedAdditionalLightOcclusionBufferAllocated();
-					if (bakedAdditionalLightOcclusionGridBuffer != null)
-					{
-						bakedAdditionalLightOcclusionGridBuffer.SetData(BakedAdditionalLightOcclusionGrid);
-						volumetricFogMaterial.SetBuffer(BakedAdditionalLightOcclusionGridBufferId, bakedAdditionalLightOcclusionGridBuffer);
-					}
-				}
-			}
-
 			BindLightParameterBuffers(volumetricFogMaterial);
 		}
 
@@ -891,7 +833,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		enableFroxelClusteredLights &= froxelClusterMinLights <= 0 || effectiveAdditionalLightsCount >= froxelClusterMinLights;
 		int froxelHash = 0;
 		if (enableFroxelClusteredLights)
-			enableFroxelClusteredLights = TryConfigureFroxelClusteredLights(volumetricFogMaterial, camera, effectiveAdditionalLightsCount, staticLightsBakeDataChanged, debugRestrictToMainCameraFrustum, debugMainCameraFrustumPlanes, out froxelHash);
+			enableFroxelClusteredLights = TryConfigureFroxelClusteredLights(volumetricFogMaterial, camera, effectiveAdditionalLightsCount, false, debugRestrictToMainCameraFrustum, debugMainCameraFrustumPlanes, out froxelHash);
 
 		if (!isMaterialStateInitialized || cachedFroxelClusteredLightsEnabled != enableFroxelClusteredLights)
 		{
@@ -2746,7 +2688,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		ReleaseDebugSolidCubeResources();
 		ReleaseFroxelBuffers();
 		ResetMaterialStateCache();
-		ResetStaticLightsBakeCache();
 		ResetTemporalHistoryState();
 	}
 
