@@ -340,6 +340,25 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		ResetMaterialStateCache();
 	}
 
+	/// <summary>
+	/// Ensures pass indices and required materials are valid.
+	/// </summary>
+	/// <returns></returns>
+	public bool EnsureValidPasses()
+	{
+		if (downsampleDepthMaterial == null || volumetricFogMaterial == null)
+			return false;
+
+		if (downsampleDepthPassIndex < 0 || volumetricFogRenderPassIndex < 0 || volumetricFogHorizontalBlurPassIndex < 0 || volumetricFogVerticalBlurPassIndex < 0 || volumetricFogUpsampleCompositionPassIndex < 0)
+			InitializePassesIndices();
+
+		return downsampleDepthPassIndex >= 0
+			&& volumetricFogRenderPassIndex >= 0
+			&& volumetricFogHorizontalBlurPassIndex >= 0
+			&& volumetricFogVerticalBlurPassIndex >= 0
+			&& volumetricFogUpsampleCompositionPassIndex >= 0;
+	}
+
 	#endregion
 
 	#region Scriptable Render Pass Methods

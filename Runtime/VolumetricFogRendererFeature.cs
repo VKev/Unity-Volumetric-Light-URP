@@ -65,6 +65,10 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 		if (!EnsureVolumetricFogRenderPassInitialized(false))
 			return;
 
+#if UNITY_EDITOR
+		// Re-push all material state every frame in editor to survive shader/save reload cycles.
+		volumetricFogRenderPass.InvalidateMaterialStateCache();
+#endif
 		if (renderingData.cameraData.cameraType == CameraType.SceneView)
 			volumetricFogRenderPass.InvalidateMaterialStateCache();
 
@@ -170,7 +174,8 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	private bool EnsureVolumetricFogRenderPassInitialized(bool forceRefresh)
 	{
 		bool resourcesOk = ValidateResourcesForVolumetricFogRenderPass(false);
-		bool shouldRecreatePass = forceRefresh || !resourcesOk || volumetricFogRenderPass == null;
+		bool passOk = volumetricFogRenderPass != null && volumetricFogRenderPass.EnsureValidPasses();
+		bool shouldRecreatePass = forceRefresh || !resourcesOk || !passOk;
 		if (shouldRecreatePass)
 		{
 			if (!ValidateResourcesForVolumetricFogRenderPass(true))
@@ -190,6 +195,11 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// <returns></returns>
 	private bool ValidateResourcesForVolumetricFogRenderPass(bool forceRefresh)
 	{
+		if (downsampleDepthShader == null)
+			downsampleDepthShader = Shader.Find("Hidden/DownsampleDepth");
+		if (volumetricFogShader == null)
+			volumetricFogShader = Shader.Find("Hidden/VolumetricFog");
+
 		if (forceRefresh)
 		{
 #if UNITY_EDITOR
@@ -203,8 +213,8 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 			volumetricFogMaterial = CoreUtils.CreateEngineMaterial(volumetricFogShader);
 		}
 
-		bool okDepth = downsampleDepthShader != null && downsampleDepthMaterial != null;
-		bool okVolumetric = volumetricFogShader != null && volumetricFogMaterial != null;
+		bool okDepth = downsampleDepthShader != null && downsampleDepthMaterial != null && downsampleDepthMaterial.shader == downsampleDepthShader;
+		bool okVolumetric = volumetricFogShader != null && volumetricFogMaterial != null && volumetricFogMaterial.shader == volumetricFogShader;
 		
 		return okDepth && okVolumetric;
 	}
