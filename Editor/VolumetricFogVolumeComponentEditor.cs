@@ -140,7 +140,7 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		if (staticLightsBakeEnabled)
 		{
 			PropertyField(staticLightsBakeRevision);
-			EditorGUILayout.HelpBox("Static lights (GameObject Static or Light Mode Mixed/Baked) use baked snapshot values until Bake Revision changes. Dynamic lights and camera-dependent behavior stay live.", MessageType.Info);
+			EditorGUILayout.HelpBox("Static lights (GameObject Static or Light Mode Mixed/Baked) and static-object occlusion from static colliders use baked snapshot values until Bake Revision changes. Dynamic lights and camera-dependent behavior stay live.", MessageType.Info);
 		}
 
 		PropertyField(enabled);

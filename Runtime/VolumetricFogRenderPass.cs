@@ -150,6 +150,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int BakedAdditionalLightColorsArrayId = Shader.PropertyToID("_BakedAdditionalLightColors");
 	private static readonly int BakedAdditionalLightDirectionsArrayId = Shader.PropertyToID("_BakedAdditionalLightDirections");
 	private static readonly int BakedAdditionalLightSpotDataArrayId = Shader.PropertyToID("_BakedAdditionalLightSpotData");
+	private static readonly int BakedAdditionalLightOcclusionGridBufferId = Shader.PropertyToID("_BakedAdditionalLightOcclusionGrid");
+	private static readonly int BakedAdditionalLightOcclusionGridSizeId = Shader.PropertyToID("_BakedAdditionalLightOcclusionGridSize");
 
 	private const int MaxVisibleAdditionalLights = 256;
 	private const int FroxelGridWidth = 16;
@@ -157,6 +159,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private const int FroxelGridDepth = 24;
 	private const int FroxelMaxLightsPerCell = 24;
 	private const int FroxelCount = FroxelGridWidth * FroxelGridHeight * FroxelGridDepth;
+	private const int BakedAdditionalLightOcclusionGridSize = 10;
+	private const int BakedAdditionalLightOcclusionVoxelCount = BakedAdditionalLightOcclusionGridSize * BakedAdditionalLightOcclusionGridSize * BakedAdditionalLightOcclusionGridSize;
+	private const int StaticOcclusionRaycastHitsCapacity = 64;
+	private const float StaticOcclusionRayBias = 0.01f;
 	private const float MinAdditionalLightScattering = 0.0001f;
 	private const float MinAdditionalLightIntensity = 0.001f;
 	private static int LightsParametersLength = MaxVisibleAdditionalLights + 1;
@@ -178,12 +184,15 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly Vector4[] BakedAdditionalLightColors = new Vector4[MaxVisibleAdditionalLights];
 	private static readonly Vector4[] BakedAdditionalLightDirections = new Vector4[MaxVisibleAdditionalLights];
 	private static readonly Vector4[] BakedAdditionalLightSpotData = new Vector4[MaxVisibleAdditionalLights];
+	private static readonly float[] BakedAdditionalLightOcclusionGrid = new float[MaxVisibleAdditionalLights * BakedAdditionalLightOcclusionVoxelCount];
+	private static readonly RaycastHit[] StaticOcclusionHits = new RaycastHit[StaticOcclusionRaycastHitsCapacity];
 	private static readonly FroxelMeta[] FroxelMetas = new FroxelMeta[FroxelCount];
 	private static readonly int[] FroxelLightIndices = new int[FroxelCount * FroxelMaxLightsPerCell];
 	private static readonly int[] FroxelCellLightCounts = new int[FroxelCount];
 
 	private static ComputeBuffer froxelMetaBuffer;
 	private static ComputeBuffer froxelLightIndicesBuffer;
+	private static ComputeBuffer bakedAdditionalLightOcclusionGridBuffer;
 
 	private int downsampleDepthPassIndex;
 	private int volumetricFogRenderPassIndex;
@@ -620,6 +629,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			volumetricFogMaterial.SetVector(BakedMainLightDirectionId, new Vector4(bakedMainLight.direction.x, bakedMainLight.direction.y, bakedMainLight.direction.z, 0.0f));
 			volumetricFogMaterial.SetColor(BakedMainLightColorId, new Color(bakedMainLight.color.x, bakedMainLight.color.y, bakedMainLight.color.z, 1.0f));
 		}
+		bool enableBakedAdditionalLightOcclusionGrid = enableStaticLightsBake && hasValidStaticLightsBake && bakedStaticLightsCount > 0 && SystemInfo.graphicsShaderLevel >= 45;
+		volumetricFogMaterial.SetInteger(BakedAdditionalLightOcclusionGridSizeId, enableBakedAdditionalLightOcclusionGrid ? BakedAdditionalLightOcclusionGridSize : 0);
 
 		volumetricFogMaterial.SetInteger(FrameCountId, Time.renderedFrameCount % 64);
 		SetIntIfChanged(volumetricFogMaterial, CustomAdditionalLightsCountId, effectiveAdditionalLightsCount, ref cachedAdditionalLightsCount);
@@ -654,6 +665,15 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 					volumetricFogMaterial.SetVectorArray(BakedAdditionalLightColorsArrayId, BakedAdditionalLightColors);
 					volumetricFogMaterial.SetVectorArray(BakedAdditionalLightDirectionsArrayId, BakedAdditionalLightDirections);
 					volumetricFogMaterial.SetVectorArray(BakedAdditionalLightSpotDataArrayId, BakedAdditionalLightSpotData);
+					if (enableBakedAdditionalLightOcclusionGrid)
+					{
+						EnsureBakedAdditionalLightOcclusionBufferAllocated();
+						if (bakedAdditionalLightOcclusionGridBuffer != null)
+						{
+							bakedAdditionalLightOcclusionGridBuffer.SetData(BakedAdditionalLightOcclusionGrid);
+							volumetricFogMaterial.SetBuffer(BakedAdditionalLightOcclusionGridBufferId, bakedAdditionalLightOcclusionGridBuffer);
+						}
+					}
 				}
 				cachedLightsHash = lightsHash;
 			}
@@ -662,7 +682,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		bool enableFroxelClusteredLights = enableAdditionalLightsContribution && effectiveAdditionalLightsCount > 0;
 		int froxelHash = 0;
 		if (enableFroxelClusteredLights)
-			enableFroxelClusteredLights = TryConfigureFroxelClusteredLights(volumetricFogMaterial, camera, effectiveAdditionalLightsCount, debugRestrictToMainCameraFrustum, debugMainCameraFrustumPlanes, out froxelHash);
+			enableFroxelClusteredLights = TryConfigureFroxelClusteredLights(volumetricFogMaterial, camera, effectiveAdditionalLightsCount, staticLightsBakeDataChanged, debugRestrictToMainCameraFrustum, debugMainCameraFrustumPlanes, out froxelHash);
 
 		if (!isMaterialStateInitialized || cachedFroxelClusteredLightsEnabled != enableFroxelClusteredLights)
 		{
@@ -756,6 +776,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			BakedAdditionalLightDirections[i] = Vector4.zero;
 			BakedAdditionalLightSpotData[i] = Vector4.zero;
 		}
+		for (int i = 0; i < BakedAdditionalLightOcclusionGrid.Length; ++i)
+			BakedAdditionalLightOcclusionGrid[i] = 1.0f;
 
 #if UNITY_2023_1_OR_NEWER
 		Light[] sceneLights = UnityEngine.Object.FindObjectsByType<Light>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
@@ -793,6 +815,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 				BakedAdditionalLightColors[bakedStaticLightIndex] = new Vector4(bakedData.color.x, bakedData.color.y, bakedData.color.z, 0.0f);
 				BakedAdditionalLightDirections[bakedStaticLightIndex] = new Vector4(bakedData.spotDirection.x, bakedData.spotDirection.y, bakedData.spotDirection.z, 0.0f);
 				BakedAdditionalLightSpotData[bakedStaticLightIndex] = new Vector4(bakedData.isSpotAtBake ? 1.0f : 0.0f, bakedData.spotCosOuter, bakedData.spotInvCosRange, 0.0f);
+				BakeStaticAdditionalLightOcclusionGrid(bakedStaticLightIndex, bakedData);
 			}
 		}
 
@@ -812,6 +835,28 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	}
 
 	/// <summary>
+	/// Returns whether this game object should be treated as static for volumetric bake.
+	/// </summary>
+	/// <param name="gameObject"></param>
+	/// <returns></returns>
+	private static bool IsGameObjectStaticForBake(GameObject gameObject)
+	{
+		if (gameObject == null)
+			return false;
+
+		if (gameObject.isStatic)
+			return true;
+
+#if UNITY_EDITOR
+		UnityEditor.StaticEditorFlags staticFlags = UnityEditor.GameObjectUtility.GetStaticEditorFlags(gameObject);
+		if ((staticFlags & UnityEditor.StaticEditorFlags.ContributeGI) != 0)
+			return true;
+#endif
+
+		return false;
+	}
+
+	/// <summary>
 	/// Returns whether this light should be treated as static for volumetric bake.
 	/// </summary>
 	/// <param name="light"></param>
@@ -821,14 +866,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (light == null || light.gameObject == null)
 			return false;
 
-		if (light.gameObject.isStatic)
+		if (IsGameObjectStaticForBake(light.gameObject))
 			return true;
-
-#if UNITY_EDITOR
-		UnityEditor.StaticEditorFlags staticFlags = UnityEditor.GameObjectUtility.GetStaticEditorFlags(light.gameObject);
-		if ((staticFlags & UnityEditor.StaticEditorFlags.ContributeGI) != 0)
-			return true;
-#endif
 
 		LightmapBakeType bakeType = light.lightmapBakeType;
 		return bakeType == LightmapBakeType.Baked || bakeType == LightmapBakeType.Mixed;
@@ -903,6 +942,75 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			spotCosOuter = spotCosOuter,
 			spotInvCosRange = spotInvCosRange
 		};
+	}
+
+	/// <summary>
+	/// Bakes static-object occlusion into a light-local 3D grid for one static baked additional light.
+	/// </summary>
+	/// <param name="bakedStaticLightIndex"></param>
+	/// <param name="bakedLightData"></param>
+	private static void BakeStaticAdditionalLightOcclusionGrid(int bakedStaticLightIndex, in BakedAdditionalLightData bakedLightData)
+	{
+		if (bakedStaticLightIndex < 0 || bakedStaticLightIndex >= MaxVisibleAdditionalLights)
+			return;
+
+		int gridSize = BakedAdditionalLightOcclusionGridSize;
+		int gridSlice = gridSize * gridSize;
+		int baseOffset = bakedStaticLightIndex * BakedAdditionalLightOcclusionVoxelCount;
+		float range = Mathf.Max(bakedLightData.range, 0.01f);
+		Vector3 lightPosition = bakedLightData.position;
+
+		for (int z = 0; z < gridSize; ++z)
+		{
+			float nz = ((z + 0.5f) / gridSize) * 2.0f - 1.0f;
+			for (int y = 0; y < gridSize; ++y)
+			{
+				float ny = ((y + 0.5f) / gridSize) * 2.0f - 1.0f;
+				for (int x = 0; x < gridSize; ++x)
+				{
+					float nx = ((x + 0.5f) / gridSize) * 2.0f - 1.0f;
+					Vector3 samplePosition = lightPosition + new Vector3(nx, ny, nz) * range;
+					int voxelOffset = x + y * gridSize + z * gridSlice;
+					BakedAdditionalLightOcclusionGrid[baseOffset + voxelOffset] = ComputeStaticRayOcclusion(lightPosition, samplePosition);
+				}
+			}
+		}
+	}
+
+	/// <summary>
+	/// Computes binary static occlusion between two world positions.
+	/// </summary>
+	/// <param name="origin"></param>
+	/// <param name="target"></param>
+	/// <returns></returns>
+	private static float ComputeStaticRayOcclusion(in Vector3 origin, in Vector3 target)
+	{
+		Vector3 toTarget = target - origin;
+		float distance = toTarget.magnitude;
+		if (distance <= StaticOcclusionRayBias)
+			return 1.0f;
+
+		Vector3 direction = toTarget / distance;
+		Ray ray = new Ray(origin + direction * StaticOcclusionRayBias, direction);
+		float rayDistance = distance - StaticOcclusionRayBias;
+		int hitCount = Physics.RaycastNonAlloc(ray, StaticOcclusionHits, rayDistance, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+		if (hitCount <= 0)
+			return 1.0f;
+
+		for (int i = 0; i < hitCount; ++i)
+		{
+			Collider hitCollider = StaticOcclusionHits[i].collider;
+			if (hitCollider == null)
+				continue;
+
+			if (StaticOcclusionHits[i].distance <= 0.0001f)
+				continue;
+
+			if (IsGameObjectStaticForBake(hitCollider.gameObject))
+				return 0.0f;
+		}
+
+		return 1.0f;
 	}
 
 	/// <summary>
@@ -1287,9 +1395,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="material"></param>
 	/// <param name="camera"></param>
 	/// <param name="selectedAdditionalLightsCount"></param>
+	/// <param name="forceRebuild"></param>
 	/// <param name="froxelHash"></param>
 	/// <returns></returns>
-	private static bool TryConfigureFroxelClusteredLights(Material material, Camera camera, int selectedAdditionalLightsCount, bool debugRestrictToMainCameraFrustum, Vector4[] debugMainCameraFrustumPlanes, out int froxelHash)
+	private static bool TryConfigureFroxelClusteredLights(Material material, Camera camera, int selectedAdditionalLightsCount, bool forceRebuild, bool debugRestrictToMainCameraFrustum, Vector4[] debugMainCameraFrustumPlanes, out int froxelHash)
 	{
 		froxelHash = 0;
 		if (camera == null || selectedAdditionalLightsCount <= 0 || !SystemInfo.supportsComputeShaders)
@@ -1301,7 +1410,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (froxelMetaBuffer == null || froxelLightIndicesBuffer == null)
 			return false;
 
-		if (!isMaterialStateInitialized || froxelHash != cachedFroxelHash)
+		if (!isMaterialStateInitialized || froxelHash != cachedFroxelHash || forceRebuild)
 		{
 			BuildFroxelClusters(camera, selectedAdditionalLightsCount);
 			froxelMetaBuffer.SetData(FroxelMetas);
@@ -1333,6 +1442,19 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		{
 			froxelLightIndicesBuffer?.Release();
 			froxelLightIndicesBuffer = new ComputeBuffer(froxelLightIndicesCount, sizeof(int), ComputeBufferType.Structured);
+		}
+	}
+
+	/// <summary>
+	/// Ensures baked additional-light occlusion buffer is allocated.
+	/// </summary>
+	private static void EnsureBakedAdditionalLightOcclusionBufferAllocated()
+	{
+		int count = MaxVisibleAdditionalLights * BakedAdditionalLightOcclusionVoxelCount;
+		if (bakedAdditionalLightOcclusionGridBuffer == null || bakedAdditionalLightOcclusionGridBuffer.count != count || bakedAdditionalLightOcclusionGridBuffer.stride != sizeof(float))
+		{
+			bakedAdditionalLightOcclusionGridBuffer?.Release();
+			bakedAdditionalLightOcclusionGridBuffer = new ComputeBuffer(count, sizeof(float), ComputeBufferType.Structured);
 		}
 	}
 
@@ -2017,6 +2139,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		froxelLightIndicesBuffer?.Release();
 		froxelLightIndicesBuffer = null;
+
+		bakedAdditionalLightOcclusionGridBuffer?.Release();
+		bakedAdditionalLightOcclusionGridBuffer = null;
 	}
 
 #if UNITY_6000_0_OR_NEWER

@@ -41,8 +41,13 @@ float4 _BakedAdditionalLightPositions[MAX_VISIBLE_LIGHTS];
 float4 _BakedAdditionalLightColors[MAX_VISIBLE_LIGHTS];
 float4 _BakedAdditionalLightDirections[MAX_VISIBLE_LIGHTS];
 float4 _BakedAdditionalLightSpotData[MAX_VISIBLE_LIGHTS];
+int _BakedAdditionalLightOcclusionGridSize;
 float4 _FroxelGridDimensions;
 float4 _FroxelNearFar;
+
+#if SHADER_TARGET >= 45
+StructuredBuffer<float> _BakedAdditionalLightOcclusionGrid;
+#endif
 
 #if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
 StructuredBuffer<int2> _FroxelMetaBuffer;
@@ -186,8 +191,26 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
 		float distToPosMagnitudeSq = max(dot(distToPos, distToPos), 0.0001);
 		float3 lightDirection = distToPos * rsqrt(distToPosMagnitudeSq);
 
+		float bakedOcclusion = 1.0;
+#if SHADER_TARGET >= 45
+		UNITY_BRANCH
+		if (_BakedAdditionalLightOcclusionGridSize > 1)
+		{
+			int gridSize = _BakedAdditionalLightOcclusionGridSize;
+			int gridSlice = gridSize * gridSize;
+			float invRange = sqrt(max(bakedLightPos.w, 0.000001));
+			float3 lightLocal01 = saturate((-distToPos * invRange) * 0.5 + 0.5);
+			int gx = min(gridSize - 1, (int)(lightLocal01.x * gridSize));
+			int gy = min(gridSize - 1, (int)(lightLocal01.y * gridSize));
+			int gz = min(gridSize - 1, (int)(lightLocal01.z * gridSize));
+			int bakedOcclusionIndex = bakedLightIndex * (gridSlice * gridSize) + gx + gy * gridSize + gz * gridSlice;
+			bakedOcclusion = _BakedAdditionalLightOcclusionGrid[bakedOcclusionIndex];
+		}
+#endif
+
 		float distanceAttenuation = saturate(1.0 - distToPosMagnitudeSq * bakedLightPos.w);
 		distanceAttenuation *= distanceAttenuation;
+		distanceAttenuation *= saturate(bakedOcclusion);
 
 		float4 bakedSpotData = _BakedAdditionalLightSpotData[bakedLightIndex];
 		UNITY_BRANCH
