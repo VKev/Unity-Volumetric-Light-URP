@@ -457,16 +457,12 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
             if (TrySampleBaked3DField(currPosWS, bakedExtinction, bakedRadianceSample))
             {
                 // Baked extinction is converted back to equivalent density for step attenuation.
-                density = bakedExtinction / max(_Absortion, 0.0001);
-                // In hybrid mode (realtime lights enabled), keep realtime lighting path for visual parity.
-                // Baked radiance is only consumed in pure baked-light mode.
-                if (_Baked3DAddRealtimeLights <= 0)
-                    bakedRadiance = (half3)bakedRadianceSample;
+                float bakedDensity = bakedExtinction / max(_Absortion, 0.0001);
+                if (bakedDensity > 0.000001)
+                    density = bakedDensity;
+                bakedRadiance = (half3)bakedRadianceSample;
             }
-            else
-            {
-                density = 0.0;
-            }
+            // Outside baked volume we keep realtime density/light evaluation.
         }
                     
         UNITY_BRANCH
