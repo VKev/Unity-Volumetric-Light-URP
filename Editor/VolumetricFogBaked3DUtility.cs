@@ -9,7 +9,6 @@ using UnityEngine;
 /// </summary>
 internal static class VolumetricFogBaked3DUtility
 {
-	private const float IsotropicPhase = 0.0795774715f; // 1 / (4 * PI)
 	private const float MinRange = 0.01f;
 	private const float MinRayBias = 0.01f;
 	private const float MinIntensity = 0.001f;
@@ -79,7 +78,7 @@ internal static class VolumetricFogBaked3DUtility
 						{
 							float mainOcclusion = ComputeDirectionalStaticOcclusion(worldPos, mainLightDirection, mainShadowRayDistance);
 							if (mainOcclusion > 0.0f)
-								radiance += mainLightTintedColor * (mainScattering * density * mainOcclusion * IsotropicPhase);
+								radiance += mainLightTintedColor * (mainScattering * density * mainOcclusion);
 						}
 
 						for (int i = 0; i < staticAdditionalLights.Count; ++i)
@@ -113,7 +112,7 @@ internal static class VolumetricFogBaked3DUtility
 							if (occlusion <= 0.0f)
 								continue;
 
-							radiance += light.color * (distanceAttenuation * localScattering * density * occlusion * IsotropicPhase);
+							radiance += light.color * (distanceAttenuation * localScattering * density * occlusion);
 						}
 					}
 
@@ -140,6 +139,8 @@ internal static class VolumetricFogBaked3DUtility
 		volume.baked3DRadianceTexture.overrideState = true;
 		volume.baked3DExtinctionTexture.value = extinctionTexture;
 		volume.baked3DRadianceTexture.value = radianceTexture;
+
+		Debug.Log($"[VolumetricFog Bake3D] Completed. Static main baked: {hasStaticMainLight}. Static additional baked: {staticAdditionalLights.Count}. Resolution: {resolution}. Volume center: {center}, size: {sizeSafe}.");
 	}
 
 	private static float EvaluateFogDensity(VolumetricFogVolumeComponent volume, float worldY)
