@@ -946,14 +946,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		{
 			float range = Mathf.Max(bakedLight.range, 0.01f);
 			Vector3 bakedPosition = bakedLight.position;
-			float maxDistance = fogDistance + range;
-			float distanceSq = (bakedPosition - cameraPosition).sqrMagnitude;
-			if (distanceSq > maxDistance * maxDistance)
+			float bakedMaxDistance = fogDistance + range;
+			float bakedDistanceSq = (bakedPosition - cameraPosition).sqrMagnitude;
+			if (bakedDistanceSq > bakedMaxDistance * bakedMaxDistance)
 				return false;
 
-			float lightMinY = bakedPosition.y - range;
-			float lightMaxY = bakedPosition.y + range;
-			if (lightMaxY < fogMinHeight || lightMinY > fogMaxHeight)
+			float bakedLightMinY = bakedPosition.y - range;
+			float bakedLightMaxY = bakedPosition.y + range;
+			if (bakedLightMaxY < fogMinHeight || bakedLightMinY > fogMaxHeight)
 				return false;
 
 			anisotropy = bakedLight.anisotropy;
@@ -962,8 +962,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			lightPosition = bakedPosition;
 			lightRange = range;
 
-			float distanceWeight = (range * range) / Mathf.Max(distanceSq, 1.0f);
-			score = scattering * bakedLight.intensity * distanceWeight * bakedLight.spotFactor;
+			float bakedDistanceWeight = (range * range) / Mathf.Max(bakedDistanceSq, 1.0f);
+			score = scattering * bakedLight.intensity * bakedDistanceWeight * bakedLight.spotFactor;
 			if (score <= 0.0f)
 				return false;
 
