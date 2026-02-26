@@ -98,6 +98,8 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	public Vector3Parameter baked3DVolumeSize = new Vector3Parameter(new Vector3(128.0f, 64.0f, 128.0f));
 	[Tooltip("Voxel resolution per axis used when baking 3D textures from the inspector Bake 3D button.")]
 	public ClampedIntParameter baked3DResolution = new ClampedIntParameter(64, 16, 256);
+	[HideInInspector]
+	public IntParameter baked3DRevision = new IntParameter(0);
 	[Tooltip("Disabling this will completely remove any feature from the volumetric fog from being rendered at all.")]
 	public BoolParameter enabled = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
 

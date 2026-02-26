@@ -150,7 +150,8 @@ internal static class VolumetricFogBaked3DUtility
 		volume.baked3DRadianceTexture.overrideState = true;
 		volume.baked3DExtinctionTexture.value = extinctionTexture;
 		volume.baked3DRadianceTexture.value = radianceTexture;
-		VolumetricFogRenderPass.InvalidateStaticLightsBakeCache();
+		volume.baked3DRevision.overrideState = true;
+		volume.baked3DRevision.value = Mathf.Max(0, volume.baked3DRevision.value + 1);
 
 		Debug.Log($"[VolumetricFog Bake3D] Completed. Static main baked: {hasStaticMainLight}. Static additional baked: {staticAdditionalLights.Count}. Non-zero radiance voxels: {nonZeroRadianceVoxelCount}/{voxelCount}. Max radiance channel: {maxRadianceChannel:F4}. Resolution: {resolution}. Volume center: {center}, size: {sizeSafe}.");
 	}

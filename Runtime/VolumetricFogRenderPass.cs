@@ -266,6 +266,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static int cachedMainCameraFrustumPlanesHash;
 	private static int cachedFroxelHash;
 	private static int cachedStaticLightsBakeRevision;
+	private static int cachedBaked3DRevision;
 	private static int bakedStaticSceneHash;
 	private static int bakedStaticLightsCount;
 	private static float cachedDistance;
@@ -714,6 +715,20 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		bool baked3DAddRealtimeLights = true;
 		bool excludeStaticLightsFromRealtime = hasValidBaked3DTextures;
 		bool useBakedStaticLightData = hasValidBaked3DTextures;
+		if (useBakedStaticLightData)
+		{
+			int baked3DRevision = fogVolume.baked3DRevision.value;
+			if (cachedBaked3DRevision != baked3DRevision)
+			{
+				ResetStaticLightsBakeCache();
+				cachedBaked3DRevision = baked3DRevision;
+			}
+		}
+		else if (cachedBaked3DRevision != int.MinValue)
+		{
+			ResetStaticLightsBakeCache();
+			cachedBaked3DRevision = int.MinValue;
+		}
 		bool enableMainLightContribution = fogVolume.enableMainLightContribution.value && fogVolume.scattering.value > 0.0f && mainLightIndex > -1;
 		bool enableAdditionalLightsContribution = fogVolume.enableAdditionalLightsContribution.value && additionalLightsCount > 0 && fogVolume.maxAdditionalLights.value > 0;
 
@@ -1075,6 +1090,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		bakedStaticSceneHash = int.MinValue;
 		bakedStaticLightsCount = 0;
 		cachedStaticLightsBakeRevision = int.MinValue;
+		cachedBaked3DRevision = int.MinValue;
 		nextStaticSceneHashCheckFrame = 0;
 		BakedAdditionalLightsByInstanceId.Clear();
 		bakedMainLight = default;
@@ -2608,6 +2624,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedLightsHash = int.MinValue;
 		cachedMainCameraFrustumPlanesHash = int.MinValue;
 		cachedFroxelHash = int.MinValue;
+		cachedBaked3DRevision = int.MinValue;
 		cachedDistance = float.NaN;
 		cachedBaseHeight = float.NaN;
 		cachedMaximumHeight = float.NaN;
