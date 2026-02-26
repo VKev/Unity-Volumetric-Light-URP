@@ -198,6 +198,7 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
 	{
 		int bakedLightIndex = -additionalLightIndex - 1;
 		float4 bakedLightPos = _BakedAdditionalLightPositions[bakedLightIndex];
+		float4 bakedLightColor = _BakedAdditionalLightColors[bakedLightIndex];
 		float4 bakedSpotData = _BakedAdditionalLightSpotData[bakedLightIndex];
 		float3 distToPos = bakedLightPos.xyz - currPosWS;
 		float distToPosMagnitudeSq = max(dot(distToPos, distToPos), 0.0001);
@@ -206,7 +207,7 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
 		float bakedOcclusion = 1.0;
 #if SHADER_TARGET >= 45
 		UNITY_BRANCH
-		if (_BakedAdditionalLightOcclusionGridSize > 1)
+		if (_BakedAdditionalLightOcclusionGridSize > 1 && bakedLightColor.w > 0.5)
 		{
 			int gridSize = _BakedAdditionalLightOcclusionGridSize;
 			int gridSlice = gridSize * gridSize;
@@ -268,7 +269,7 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
 		newScattering *= scattering;
 
 		half phase = CornetteShanksPhaseFunction(_Anisotropies[compactLightIndex], dot(rd, lightDirection));
-		return (float3)((half3)_BakedAdditionalLightColors[bakedLightIndex].rgb * ((half)distanceAttenuation * phase * (half)density * (half)newScattering));
+		return (float3)((half3)bakedLightColor.rgb * ((half)distanceAttenuation * phase * (half)density * (half)newScattering));
 	}
 
 	Light additionalLight = GetAdditionalPerObjectLight(additionalLightIndex, currPosWS);
