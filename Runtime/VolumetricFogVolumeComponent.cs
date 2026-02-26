@@ -86,7 +86,7 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	[Tooltip("When greater than zero, raymarching stops early once transmittance falls below this threshold. This improves performance in dense fog.")]
 	public ClampedFloatParameter transmittanceThreshold = new ClampedFloatParameter(0.0f, 0.0f, 1.0f);
 	[Header("Baked 3D Field")]
-	[Tooltip("When enabled and both baked textures are assigned, fog uses baked 3D density/radiance from static lights/objects. Realtime light changes are ignored until rebake.")]
+	[Tooltip("When enabled and both baked textures are assigned, fog uses baked 3D density/radiance from static additional lights + static objects. Main light remains realtime.")]
 	public BoolParameter enableBaked3DMode = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
 	[Tooltip("Baked 3D extinction (density * absorption) texture.")]
 	public TextureParameter baked3DExtinctionTexture = new TextureParameter(null);

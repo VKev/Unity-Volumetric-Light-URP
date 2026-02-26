@@ -44,7 +44,9 @@ internal static class VolumetricFogBaked3DUtility
 		float absorption = 1.0f / Mathf.Max(volume.attenuationDistance.value, 0.05f);
 
 		List<StaticAdditionalLightData> staticAdditionalLights = GatherStaticAdditionalLights();
-		bool hasStaticMainLight = TryGetStaticMainLight(volume, out Vector3 mainLightDirection, out Vector3 mainLightColor);
+		bool hasStaticMainLight = false;
+		Vector3 mainLightDirection = Vector3.forward;
+		Vector3 mainLightColor = Vector3.zero;
 		Color tintLinearColor = volume.tint.value.linear;
 		Vector3 tintLinear = new Vector3(tintLinearColor.r, tintLinearColor.g, tintLinearColor.b);
 		Vector3 mainLightTintedColor = Vector3.Scale(mainLightColor, tintLinear);
@@ -54,6 +56,8 @@ internal static class VolumetricFogBaked3DUtility
 		int voxelCount = resolution * resolution * resolution;
 		Color[] extinctionPixels = new Color[voxelCount];
 		Color[] radiancePixels = new Color[voxelCount];
+		float maxRadianceChannel = 0.0f;
+		int nonZeroRadianceVoxelCount = 0;
 
 		int index = 0;
 		for (int z = 0; z < resolution; ++z)
@@ -118,6 +122,13 @@ internal static class VolumetricFogBaked3DUtility
 
 					extinctionPixels[index] = new Color(extinction, 0.0f, 0.0f, 1.0f);
 					radiancePixels[index] = new Color(radiance.x, radiance.y, radiance.z, 1.0f);
+					float maxChannel = Mathf.Max(radiance.x, Mathf.Max(radiance.y, radiance.z));
+					if (maxChannel > 0.000001f)
+					{
+						nonZeroRadianceVoxelCount++;
+						if (maxChannel > maxRadianceChannel)
+							maxRadianceChannel = maxChannel;
+					}
 				}
 			}
 		}
@@ -139,8 +150,9 @@ internal static class VolumetricFogBaked3DUtility
 		volume.baked3DRadianceTexture.overrideState = true;
 		volume.baked3DExtinctionTexture.value = extinctionTexture;
 		volume.baked3DRadianceTexture.value = radianceTexture;
+		VolumetricFogRenderPass.InvalidateStaticLightsBakeCache();
 
-		Debug.Log($"[VolumetricFog Bake3D] Completed. Static main baked: {hasStaticMainLight}. Static additional baked: {staticAdditionalLights.Count}. Resolution: {resolution}. Volume center: {center}, size: {sizeSafe}.");
+		Debug.Log($"[VolumetricFog Bake3D] Completed. Static main baked: {hasStaticMainLight}. Static additional baked: {staticAdditionalLights.Count}. Non-zero radiance voxels: {nonZeroRadianceVoxelCount}/{voxelCount}. Max radiance channel: {maxRadianceChannel:F4}. Resolution: {resolution}. Volume center: {center}, size: {sizeSafe}.");
 	}
 
 	private static float EvaluateFogDensity(VolumetricFogVolumeComponent volume, float worldY)
@@ -261,7 +273,11 @@ internal static class VolumetricFogBaked3DUtility
 		for (int i = 0; i < hitCount; ++i)
 		{
 			Collider hitCollider = RaycastHits[i].collider;
-			if (hitCollider != null && IsGameObjectStaticForBake(hitCollider.gameObject))
+			if (hitCollider == null)
+				continue;
+			if (RaycastHits[i].distance <= MinRayBias * 1.5f)
+				continue;
+			if (IsGameObjectStaticForBake(hitCollider.gameObject))
 				return 0.0f;
 		}
 
@@ -285,7 +301,11 @@ internal static class VolumetricFogBaked3DUtility
 		for (int i = 0; i < hitCount; ++i)
 		{
 			Collider hitCollider = RaycastHits[i].collider;
-			if (hitCollider != null && IsGameObjectStaticForBake(hitCollider.gameObject))
+			if (hitCollider == null)
+				continue;
+			if (RaycastHits[i].distance <= MinRayBias * 1.5f)
+				continue;
+			if (IsGameObjectStaticForBake(hitCollider.gameObject))
 				return 0.0f;
 		}
 

@@ -185,7 +185,7 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 				Bake3DForTargets();
 				serializedObject.Update();
 			}
-			EditorGUILayout.HelpBox("Bake 3D includes static main/additional lights and static-object occlusion only. Moving lights/static objects will not update until you bake again. Camera movement is supported.", MessageType.Info);
+			EditorGUILayout.HelpBox("Bake 3D includes static additional lights and static-object occlusion only (main light stays realtime). Moving baked lights/static objects will not update until you bake again. Camera movement is supported.", MessageType.Info);
 		}
 
 		PropertyField(enabled);

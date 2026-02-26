@@ -493,7 +493,8 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         half3 additionalLightsColor = cachedAdditionalLightsColor;
         
         // TODO: Additional contributions? Reflection probes, etc...
-        half3 stepColor = apvColor + mainLightColor + additionalLightsColor + bakedRadiance;
+        half3 bakedContribution = (_Baked3DMode > 0 && _Baked3DAddRealtimeLights <= 0) ? bakedRadiance : half3(0.0, 0.0, 0.0);
+        half3 stepColor = apvColor + mainLightColor + additionalLightsColor + bakedContribution;
         volumetricFogColor += ((float3)stepColor * (transmittance * stepLength));
 
         UNITY_BRANCH

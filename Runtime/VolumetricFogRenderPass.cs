@@ -381,6 +381,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	}
 
 	/// <summary>
+	/// Invalidates cached static-light bake data so it is rebuilt from the latest scene state.
+	/// </summary>
+	public static void InvalidateStaticLightsBakeCache()
+	{
+		ResetStaticLightsBakeCache();
+	}
+
+	/// <summary>
 	/// Ensures pass indices and required materials are valid.
 	/// </summary>
 	/// <returns></returns>
@@ -705,14 +713,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		bool hasValidBaked3DTextures = enableBaked3DMode && baked3DExtinctionTexture != null && baked3DRadianceTexture != null;
 		bool baked3DAddRealtimeLights = true;
 		bool excludeStaticLightsFromRealtime = hasValidBaked3DTextures;
+		bool useBakedStaticLightData = hasValidBaked3DTextures;
 		bool enableMainLightContribution = fogVolume.enableMainLightContribution.value && fogVolume.scattering.value > 0.0f && mainLightIndex > -1;
 		bool enableAdditionalLightsContribution = fogVolume.enableAdditionalLightsContribution.value && additionalLightsCount > 0 && fogVolume.maxAdditionalLights.value > 0;
-		if (excludeStaticLightsFromRealtime && enableMainLightContribution && mainLightIndex >= 0 && mainLightIndex < visibleLights.Length)
-		{
-			Light mainLight = visibleLights[mainLightIndex].light;
-			if (mainLight != null && IsLightStaticForBake(mainLight))
-				enableMainLightContribution = false;
-		}
 
 		volumetricFogMaterial.SetInteger(Baked3DModeId, hasValidBaked3DTextures ? 1 : 0);
 		volumetricFogMaterial.SetInteger(Baked3DAddRealtimeLightsId, baked3DAddRealtimeLights ? 1 : 0);
@@ -730,7 +733,16 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		int effectiveAdditionalLightsCount = 0;
 		if (enableMainLightContribution || enableAdditionalLightsContribution)
 		{
-			effectiveAdditionalLightsCount = UpdateLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, excludeStaticLightsFromRealtime, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
+			if (useBakedStaticLightData)
+			{
+				EnsureBakedStaticLightsCache(mainLightIndex, visibleLights);
+				UpdateStaticSceneBakeState();
+				effectiveAdditionalLightsCount = UpdateBakedLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, excludeStaticLightsFromRealtime, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
+			}
+			else
+			{
+				effectiveAdditionalLightsCount = UpdateLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, excludeStaticLightsFromRealtime, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
+			}
 		}
 
 		enableAdditionalLightsContribution &= effectiveAdditionalLightsCount > 0;
@@ -779,8 +791,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			cachedAdaptiveStepCountEnabled = enableAdaptiveStepCount;
 		}
 
-		volumetricFogMaterial.SetInteger(BakedMainLightEnabledId, 0);
-		volumetricFogMaterial.SetInteger(BakedAdditionalLightOcclusionGridSizeId, 0);
+		ConfigureBakedStaticLightShaderData(volumetricFogMaterial, useBakedStaticLightData);
 
 		volumetricFogMaterial.SetInteger(FrameCountId, Time.renderedFrameCount % 64);
 		SetIntIfChanged(volumetricFogMaterial, CustomAdditionalLightsCountId, effectiveAdditionalLightsCount, ref cachedAdditionalLightsCount);
@@ -851,6 +862,82 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	}
 
 	/// <summary>
+	/// Ensures static light bake data is available when baked static-light mode is in use.
+	/// </summary>
+	/// <param name="mainLightIndex"></param>
+	/// <param name="visibleLights"></param>
+	private static void EnsureBakedStaticLightsCache(int mainLightIndex, NativeArray<VisibleLight> visibleLights)
+	{
+		if (hasValidStaticLightsBake)
+			return;
+
+		BakeStaticLightsData(mainLightIndex, visibleLights);
+	}
+
+	/// <summary>
+	/// Updates whether static scene objects/lights diverged from the baked snapshot.
+	/// </summary>
+	private static void UpdateStaticSceneBakeState()
+	{
+		if (!hasValidStaticLightsBake)
+			return;
+
+		if (Application.isPlaying)
+		{
+			if (Time.frameCount < nextStaticSceneHashCheckFrame)
+				return;
+
+			nextStaticSceneHashCheckFrame = Time.frameCount + StaticSceneHashCheckIntervalFrames;
+		}
+
+		int currentHash = ComputeStaticSceneBakeHash();
+		hasStaticSceneStateChangedSinceBake = currentHash != bakedStaticSceneHash;
+	}
+
+	/// <summary>
+	/// Uploads baked static-light parameters used by shader-side frozen static light evaluation.
+	/// </summary>
+	/// <param name="material"></param>
+	/// <param name="useBakedStaticLightData"></param>
+	private static void ConfigureBakedStaticLightShaderData(Material material, bool useBakedStaticLightData)
+	{
+		if (material == null)
+			return;
+
+		material.SetInteger(BakedMainLightEnabledId, 0);
+
+		if (!useBakedStaticLightData || !hasValidStaticLightsBake || bakedStaticLightsCount <= 0)
+		{
+			material.SetInteger(BakedAdditionalLightOcclusionGridSizeId, 0);
+			return;
+		}
+
+		int bakeRevision = bakedStaticSceneHash ^ (bakedStaticLightsCount << 8);
+		bool shouldUpload = !isMaterialStateInitialized || cachedStaticLightsBakeRevision != bakeRevision;
+		if (shouldUpload)
+		{
+			material.SetVectorArray(BakedAdditionalLightPositionsArrayId, BakedAdditionalLightPositions);
+			material.SetVectorArray(BakedAdditionalLightColorsArrayId, BakedAdditionalLightColors);
+			material.SetVectorArray(BakedAdditionalLightDirectionsArrayId, BakedAdditionalLightDirections);
+			material.SetVectorArray(BakedAdditionalLightSpotDataArrayId, BakedAdditionalLightSpotData);
+			EnsureBakedAdditionalLightOcclusionBufferAllocated();
+			if (bakedAdditionalLightOcclusionGridBuffer != null)
+				bakedAdditionalLightOcclusionGridBuffer.SetData(BakedAdditionalLightOcclusionGrid);
+			cachedStaticLightsBakeRevision = bakeRevision;
+		}
+
+		if (bakedAdditionalLightOcclusionGridBuffer != null)
+		{
+			material.SetBuffer(BakedAdditionalLightOcclusionGridBufferId, bakedAdditionalLightOcclusionGridBuffer);
+			material.SetInteger(BakedAdditionalLightOcclusionGridSizeId, BakedAdditionalLightOcclusionGridSize);
+		}
+		else
+		{
+			material.SetInteger(BakedAdditionalLightOcclusionGridSizeId, 0);
+		}
+	}
+
+	/// <summary>
 	/// Updates and selects additional lights using baked static light data.
 	/// </summary>
 	/// <param name="fogVolume"></param>
@@ -865,6 +952,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static int UpdateBakedLightsParameters(VolumetricFogVolumeComponent fogVolume, bool enableMainLightContribution, bool enableAdditionalLightsContribution, bool excludeStaticLightsFromRealtime, int mainLightIndex, int additionalLightsCount, NativeArray<VisibleLight> visibleLights, Vector3 cameraPosition, out int lightsHash)
 	{
 		int effectiveAdditionalLightsCount = 0;
+		if (!hasValidStaticLightsBake)
+			return UpdateLightsParameters(fogVolume, enableMainLightContribution, enableAdditionalLightsContribution, excludeStaticLightsFromRealtime, mainLightIndex, additionalLightsCount, visibleLights, cameraPosition, out lightsHash);
 
 		if (enableAdditionalLightsContribution && hasValidStaticLightsBake && visibleLights.Length > 0)
 		{
@@ -1357,8 +1446,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			return false;
 
 		if (light.type != LightType.Point && light.type != LightType.Spot)
-			return false;
-		if (excludeStaticLightsFromRealtime && IsLightStaticForBake(light))
 			return false;
 
 		if (!TryGetCachedBakedAdditionalLightData(light, out BakedAdditionalLightData bakedLight))
@@ -2687,6 +2774,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		volumetricFogUpsampleCompositionRTHandle?.Release();
 		ReleaseDebugSolidCubeResources();
 		ReleaseFroxelBuffers();
+		ResetStaticLightsBakeCache();
 		ResetMaterialStateCache();
 		ResetTemporalHistoryState();
 	}
