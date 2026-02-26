@@ -96,11 +96,38 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 		base.Dispose(disposing);
 
 		volumetricFogRenderPass?.Dispose();
+		volumetricFogRenderPass = null;
 		lastKnownMainCamera = null;
 
 		CoreUtils.Destroy(downsampleDepthMaterial);
+		downsampleDepthMaterial = null;
 		CoreUtils.Destroy(volumetricFogMaterial);
+		volumetricFogMaterial = null;
 	}
+
+	#endregion
+
+	#region Unity Editor Methods
+
+#if UNITY_EDITOR
+
+	/// <summary>
+	/// Refreshes pass resources when the renderer feature is reloaded or modified in editor.
+	/// </summary>
+	private void OnValidate()
+	{
+		EnsureVolumetricFogRenderPassInitialized(true);
+	}
+
+	/// <summary>
+	/// Ensures resources are re-created after editor reload/save cycles.
+	/// </summary>
+	private void OnEnable()
+	{
+		EnsureVolumetricFogRenderPassInitialized(true);
+	}
+
+#endif
 
 	#endregion
 

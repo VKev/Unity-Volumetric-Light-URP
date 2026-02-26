@@ -1,5 +1,6 @@
 using UnityEditor;
 using UnityEditor.Rendering;
+using UnityEngine;
 
 /// <summary>
 /// Custom editor for the volumetric fog volume component.
@@ -139,7 +140,17 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		bool staticLightsBakeEnabled = enableStaticLightsBake.overrideState.boolValue && enableStaticLightsBake.value.boolValue;
 		if (staticLightsBakeEnabled)
 		{
-			PropertyField(staticLightsBakeRevision);
+			EditorGUILayout.Space(2.0f);
+			if (GUILayout.Button("Bake", GUILayout.Height(22.0f)))
+			{
+				Undo.RecordObjects(targets, "Bake Volumetric Static Lights");
+				staticLightsBakeRevision.overrideState.boolValue = true;
+				staticLightsBakeRevision.value.intValue = Mathf.Max(0, staticLightsBakeRevision.value.intValue + 1);
+				serializedObject.ApplyModifiedProperties();
+				for (int i = 0; i < targets.Length; ++i)
+					EditorUtility.SetDirty(targets[i]);
+			}
+
 			EditorGUILayout.HelpBox("Static lights (GameObject Static or Light Mode Mixed/Baked) and static-object occlusion from static colliders use baked snapshot values until Bake Revision changes. Dynamic lights and camera-dependent behavior stay live.", MessageType.Info);
 		}
 

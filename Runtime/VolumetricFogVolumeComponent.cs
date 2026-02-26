@@ -74,7 +74,7 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	[Header("Static Light Bake")]
 	[Tooltip("When enabled, static lights (GameObject Static or Light Mode Mixed/Baked) and static-object occlusion (from static colliders) use baked snapshot data until Bake Revision changes. Dynamic lights and camera-dependent computations remain live.")]
 	public BoolParameter enableStaticLightsBake = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
-	[Tooltip("Increase this value to refresh cached static light data after scene setup changes.")]
+	[Tooltip("Internal bake stamp. The inspector Bake button increases this to refresh cached static light data.")]
 	public MinIntParameter staticLightsBakeRevision = new MinIntParameter(0, 0);
 	[Tooltip("Disabling this will completely remove any feature from the volumetric fog from being rendered at all.")]
 	public BoolParameter enabled = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
