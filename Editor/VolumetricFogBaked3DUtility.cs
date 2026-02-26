@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 
 /// <summary>
@@ -44,7 +45,9 @@ internal static class VolumetricFogBaked3DUtility
 
 		List<StaticAdditionalLightData> staticAdditionalLights = GatherStaticAdditionalLights();
 		bool hasStaticMainLight = TryGetStaticMainLight(volume, out Vector3 mainLightDirection, out Vector3 mainLightColor);
-		Vector3 tintLinear = volume.tint.value.linear;
+		Color tintLinearColor = volume.tint.value.linear;
+		Vector3 tintLinear = new Vector3(tintLinearColor.r, tintLinearColor.g, tintLinearColor.b);
+		Vector3 mainLightTintedColor = Vector3.Scale(mainLightColor, tintLinear);
 		float mainScattering = volume.scattering.value;
 		float mainShadowRayDistance = sizeSafe.magnitude;
 
@@ -75,7 +78,7 @@ internal static class VolumetricFogBaked3DUtility
 						{
 							float mainOcclusion = ComputeDirectionalStaticOcclusion(worldPos, mainLightDirection, mainShadowRayDistance);
 							if (mainOcclusion > 0.0f)
-								radiance += mainLightColor * tintLinear * (mainScattering * density * mainOcclusion);
+								radiance += mainLightTintedColor * (mainScattering * density * mainOcclusion);
 						}
 
 						for (int i = 0; i < staticAdditionalLights.Count; ++i)
@@ -334,8 +337,14 @@ internal static class VolumetricFogBaked3DUtility
 			return;
 		}
 
-		string sceneName = volume.gameObject.scene.IsValid() ? volume.gameObject.scene.name : "Scene";
-		string volumeName = SanitizeName(volume.gameObject.name);
+		string profilePath = AssetDatabase.GetAssetPath(volume);
+		string profileName = !string.IsNullOrEmpty(profilePath)
+			? Path.GetFileNameWithoutExtension(profilePath)
+			: "VolumeProfile";
+		string sceneName = EditorSceneManager.GetActiveScene().IsValid()
+			? EditorSceneManager.GetActiveScene().name
+			: "Scene";
+		string volumeName = SanitizeName(profileName);
 		string baseDir = "Assets/VolumetricFogBakes";
 		if (!Directory.Exists(baseDir))
 			Directory.CreateDirectory(baseDir);
