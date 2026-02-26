@@ -34,6 +34,13 @@ float _Anisotropies[MAX_VISIBLE_LIGHTS + 1];
 float _Scatterings[MAX_VISIBLE_LIGHTS + 1];
 float _RadiiSq[MAX_VISIBLE_LIGHTS];
 float _AdditionalLightIndices[MAX_VISIBLE_LIGHTS];
+int _BakedMainLightEnabled;
+float3 _BakedMainLightDirection;
+float3 _BakedMainLightColor;
+float4 _BakedAdditionalLightPositions[MAX_VISIBLE_LIGHTS];
+float4 _BakedAdditionalLightColors[MAX_VISIBLE_LIGHTS];
+float4 _BakedAdditionalLightDirections[MAX_VISIBLE_LIGHTS];
+float4 _BakedAdditionalLightSpotData[MAX_VISIBLE_LIGHTS];
 float4 _FroxelGridDimensions;
 float4 _FroxelNearFar;
 
@@ -100,9 +107,13 @@ void CalculateRaymarchingParams(float2 uv, out float3 ro, out float3 rd, out flo
 float GetMainLightPhase(float3 rd)
 {
 #if _MAIN_LIGHT_CONTRIBUTION_DISABLED
-    return 0.0;
+	return 0.0;
 #else
-    return CornetteShanksPhaseFunction(_Anisotropies[_CustomAdditionalLightsCount], dot(rd, GetMainLight().direction));
+	UNITY_BRANCH
+	if (_BakedMainLightEnabled > 0)
+		return CornetteShanksPhaseFunction(_Anisotropies[_CustomAdditionalLightsCount], dot(rd, _BakedMainLightDirection));
+
+	return CornetteShanksPhaseFunction(_Anisotropies[_CustomAdditionalLightsCount], dot(rd, GetMainLight().direction));
 #endif
 }
 
@@ -135,11 +146,19 @@ float3 GetStepAdaptiveProbeVolumeEvaluation(float2 uv, float3 posWS, float densi
 float3 GetStepMainLightColor(float3 currPosWS, float phaseMainLight, float density)
 {
 #if _MAIN_LIGHT_CONTRIBUTION_DISABLED
-    return float3(0.0, 0.0, 0.0);
+	return float3(0.0, 0.0, 0.0);
 #else
-    Light mainLight = GetMainLight();
-    float4 shadowCoord = TransformWorldToShadowCoord(currPosWS);
-    mainLight.shadowAttenuation = VolumetricMainLightRealtimeShadow(shadowCoord);
+	UNITY_BRANCH
+	if (_BakedMainLightEnabled > 0)
+	{
+		half3 tint = (half3)_Tint;
+		half scattering = (half)_Scatterings[_CustomAdditionalLightsCount];
+		return (float3)((half3)_BakedMainLightColor * tint * ((half)phaseMainLight * (half)density * scattering));
+	}
+
+	Light mainLight = GetMainLight();
+	float4 shadowCoord = TransformWorldToShadowCoord(currPosWS);
+	mainLight.shadowAttenuation = VolumetricMainLightRealtimeShadow(shadowCoord);
 #if _LIGHT_COOKIES
     mainLight.color *= SampleMainLightCookie(currPosWS);
 #endif
@@ -152,14 +171,46 @@ float3 GetStepMainLightColor(float3 currPosWS, float phaseMainLight, float densi
 // Gets the accumulated color from additional lights at one raymarch step.
 float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, float3 rd, float density)
 {
-    float scattering = _Scatterings[compactLightIndex];
-    UNITY_BRANCH
-    if (scattering <= 0.0)
-        return float3(0.0, 0.0, 0.0);
+	float scattering = _Scatterings[compactLightIndex];
+	UNITY_BRANCH
+	if (scattering <= 0.0)
+		return float3(0.0, 0.0, 0.0);
 
-    int additionalLightIndex = (int)_AdditionalLightIndices[compactLightIndex];
+	int additionalLightIndex = (int)_AdditionalLightIndices[compactLightIndex];
+	UNITY_BRANCH
+	if (additionalLightIndex < 0)
+	{
+		int bakedLightIndex = -additionalLightIndex - 1;
+		float4 bakedLightPos = _BakedAdditionalLightPositions[bakedLightIndex];
+		float3 distToPos = bakedLightPos.xyz - currPosWS;
+		float distToPosMagnitudeSq = max(dot(distToPos, distToPos), 0.0001);
+		float3 lightDirection = distToPos * rsqrt(distToPosMagnitudeSq);
 
-    Light additionalLight = GetAdditionalPerObjectLight(additionalLightIndex, currPosWS);
+		float distanceAttenuation = saturate(1.0 - distToPosMagnitudeSq * bakedLightPos.w);
+		distanceAttenuation *= distanceAttenuation;
+
+		float4 bakedSpotData = _BakedAdditionalLightSpotData[bakedLightIndex];
+		UNITY_BRANCH
+		if (bakedSpotData.x > 0.5)
+		{
+			float3 spotDirection = _BakedAdditionalLightDirections[bakedLightIndex].xyz;
+			float3 dirFromLightToPoint = -lightDirection;
+			float cd = dot(spotDirection, dirFromLightToPoint);
+			float angleAttenuation = saturate((cd - bakedSpotData.y) * bakedSpotData.z);
+			angleAttenuation *= angleAttenuation;
+			distanceAttenuation *= angleAttenuation;
+		}
+
+		// Gradually reduce additional lights scattering to zero at their origin to try to avoid flicker-aliasing.
+		float newScattering = smoothstep(0.0, _RadiiSq[compactLightIndex], distToPosMagnitudeSq);
+		newScattering *= newScattering;
+		newScattering *= scattering;
+
+		half phase = CornetteShanksPhaseFunction(_Anisotropies[compactLightIndex], dot(rd, lightDirection));
+		return (float3)((half3)_BakedAdditionalLightColors[bakedLightIndex].rgb * ((half)distanceAttenuation * phase * (half)density * (half)newScattering));
+	}
+
+	Light additionalLight = GetAdditionalPerObjectLight(additionalLightIndex, currPosWS);
     additionalLight.shadowAttenuation = VolumetricAdditionalLightRealtimeShadow(additionalLightIndex, currPosWS, additionalLight.direction);
 #if _LIGHT_COOKIES
     additionalLight.color *= SampleAdditionalLightCookie(additionalLightIndex, currPosWS);
