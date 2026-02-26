@@ -54,6 +54,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private struct BakedMainLightData
 	{
 		public bool isValid;
+		public int lightInstanceId;
 		public Vector3 direction;
 		public Vector3 color;
 	}
@@ -236,6 +237,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static int cachedMainCameraFrustumPlanesHash;
 	private static int cachedFroxelHash;
 	private static int cachedStaticLightsBakeRevision;
+	private static int bakedStaticSceneHash;
 	private static int bakedStaticLightsCount;
 	private static float cachedDistance;
 	private static float cachedBaseHeight;
@@ -250,6 +252,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static int cachedMaxSteps;
 	private static float cachedTransmittanceThreshold;
 	private static bool hasValidStaticLightsBake;
+	private static bool hasStaticSceneStateChangedSinceBake;
 	private static BakedMainLightData bakedMainLight;
 
 	#endregion
@@ -578,6 +581,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			cachedStaticLightsBakeRevision = staticLightsBakeRevision;
 		}
 
+		if (enableStaticLightsBake && hasValidStaticLightsBake && (bakedStaticLightsCount > 0 || bakedMainLight.isValid))
+			hasStaticSceneStateChangedSinceBake = ComputeStaticSceneBakeHash() != bakedStaticSceneHash;
+		else
+			hasStaticSceneStateChangedSinceBake = false;
+
 		int lightsHash = 0;
 		int effectiveAdditionalLightsCount = 0;
 		if (enableMainLightContribution || enableAdditionalLightsContribution)
@@ -622,9 +630,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			cachedAdditionalLightsContributionEnabled = enableAdditionalLightsContribution;
 		}
 
-		bool useBakedMainLight = enableStaticLightsBake && hasValidStaticLightsBake && enableMainLightContribution && bakedMainLight.isValid;
-		volumetricFogMaterial.SetInteger(BakedMainLightEnabledId, useBakedMainLight ? 1 : 0);
-		if (useBakedMainLight)
+		bool freezeMainLightToBake = enableStaticLightsBake && hasValidStaticLightsBake && enableMainLightContribution && bakedMainLight.isValid;
+		freezeMainLightToBake &= !IsMainLightStillEquivalentToBake(mainLightIndex, visibleLights);
+		volumetricFogMaterial.SetInteger(BakedMainLightEnabledId, freezeMainLightToBake ? 1 : 0);
+		if (freezeMainLightToBake)
 		{
 			volumetricFogMaterial.SetVector(BakedMainLightDirectionId, new Vector4(bakedMainLight.direction.x, bakedMainLight.direction.y, bakedMainLight.direction.z, 0.0f));
 			volumetricFogMaterial.SetColor(BakedMainLightColorId, new Color(bakedMainLight.color.x, bakedMainLight.color.y, bakedMainLight.color.z, 1.0f));
@@ -819,6 +828,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			}
 		}
 
+		bakedStaticSceneHash = ComputeStaticSceneBakeHash();
+		hasStaticSceneStateChangedSinceBake = false;
 		hasValidStaticLightsBake = true;
 	}
 
@@ -828,6 +839,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static void ResetStaticLightsBakeCache()
 	{
 		hasValidStaticLightsBake = false;
+		hasStaticSceneStateChangedSinceBake = false;
+		bakedStaticSceneHash = int.MinValue;
 		bakedStaticLightsCount = 0;
 		cachedStaticLightsBakeRevision = int.MinValue;
 		BakedAdditionalLightsByInstanceId.Clear();
@@ -890,6 +903,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		Color linearColor = mainLight.color.linear;
 		bakedMainLightData.isValid = true;
+		bakedMainLightData.lightInstanceId = mainLight.GetInstanceID();
 		bakedMainLightData.direction = -mainLight.transform.forward;
 		bakedMainLightData.color = new Vector3(linearColor.r, linearColor.g, linearColor.b) * mainLight.intensity;
 		return true;
@@ -1014,6 +1028,149 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	}
 
 	/// <summary>
+	/// Computes an order-independent hash of static lights and static renderers in the scene.
+	/// </summary>
+	/// <returns></returns>
+	private static int ComputeStaticSceneBakeHash()
+	{
+		unchecked
+		{
+#if UNITY_2023_1_OR_NEWER
+			Light[] sceneLights = UnityEngine.Object.FindObjectsByType<Light>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+			Renderer[] sceneRenderers = UnityEngine.Object.FindObjectsByType<Renderer>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+#else
+			Light[] sceneLights = UnityEngine.Object.FindObjectsOfType<Light>();
+			Renderer[] sceneRenderers = UnityEngine.Object.FindObjectsOfType<Renderer>();
+#endif
+			int lightsCount = 0;
+			int lightsSum = 0;
+			int lightsXor = 0;
+			for (int i = 0; i < sceneLights.Length; ++i)
+			{
+				Light light = sceneLights[i];
+				if (light == null || !light.enabled || !light.gameObject.activeInHierarchy || !IsLightStaticForBake(light))
+					continue;
+
+				Transform transform = light.transform;
+				Color linearColor = light.color.linear;
+				int lightHash = 17;
+				lightHash = (lightHash * 31) + light.GetInstanceID();
+				lightHash = (lightHash * 31) + (int)light.type;
+				lightHash = (lightHash * 31) + light.lightmapBakeType.GetHashCode();
+				lightHash = (lightHash * 31) + transform.position.GetHashCode();
+				lightHash = (lightHash * 31) + transform.rotation.GetHashCode();
+				lightHash = (lightHash * 31) + light.range.GetHashCode();
+				lightHash = (lightHash * 31) + light.intensity.GetHashCode();
+				lightHash = (lightHash * 31) + light.spotAngle.GetHashCode();
+				lightHash = (lightHash * 31) + light.innerSpotAngle.GetHashCode();
+				lightHash = (lightHash * 31) + linearColor.GetHashCode();
+
+				lightsCount++;
+				lightsSum += lightHash;
+				lightsXor ^= (lightHash * 486187739);
+			}
+
+			int renderersCount = 0;
+			int renderersSum = 0;
+			int renderersXor = 0;
+			for (int i = 0; i < sceneRenderers.Length; ++i)
+			{
+				Renderer renderer = sceneRenderers[i];
+				if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy || !IsGameObjectStaticForBake(renderer.gameObject))
+					continue;
+
+				Transform transform = renderer.transform;
+				int rendererHash = 17;
+				rendererHash = (rendererHash * 31) + renderer.GetInstanceID();
+				rendererHash = (rendererHash * 31) + transform.position.GetHashCode();
+				rendererHash = (rendererHash * 31) + transform.rotation.GetHashCode();
+				rendererHash = (rendererHash * 31) + transform.lossyScale.GetHashCode();
+
+				renderersCount++;
+				renderersSum += rendererHash;
+				renderersXor ^= (rendererHash * 16777619);
+			}
+
+			int hash = 17;
+			hash = (hash * 31) + lightsCount;
+			hash = (hash * 31) + lightsSum;
+			hash = (hash * 31) + lightsXor;
+			hash = (hash * 31) + renderersCount;
+			hash = (hash * 31) + renderersSum;
+			hash = (hash * 31) + renderersXor;
+			return hash;
+		}
+	}
+
+	/// <summary>
+	/// Returns whether a static light still matches its baked snapshot closely enough to use the exact live shader path.
+	/// </summary>
+	/// <param name="light"></param>
+	/// <param name="volumetricLight"></param>
+	/// <param name="bakedLight"></param>
+	/// <param name="range"></param>
+	/// <param name="intensity"></param>
+	/// <param name="scattering"></param>
+	/// <returns></returns>
+	private static bool IsStaticLightStillEquivalentToBake(Light light, VolumetricAdditionalLight volumetricLight, in BakedAdditionalLightData bakedLight, float range, float intensity, float scattering)
+	{
+		const float PositionEpsilonSq = 0.000001f;
+		const float DirectionDotThreshold = 0.9999f;
+		const float ColorEpsilonSq = 0.000001f;
+		if (hasStaticSceneStateChangedSinceBake || light == null || volumetricLight == null)
+			return false;
+
+		if ((light.transform.position - bakedLight.position).sqrMagnitude > PositionEpsilonSq)
+			return false;
+
+		if (bakedLight.isSpotAtBake)
+		{
+			Vector3 currentDirection = light.transform.forward;
+			if (Vector3.Dot(currentDirection, bakedLight.spotDirection) < DirectionDotThreshold)
+				return false;
+		}
+
+		Color linearColor = light.color.linear;
+		Vector3 currentColor = new Vector3(linearColor.r, linearColor.g, linearColor.b) * intensity;
+		if ((currentColor - bakedLight.color).sqrMagnitude > ColorEpsilonSq)
+			return false;
+
+		return AreBakedAdditionalLightConstantsStillValid(light, volumetricLight, bakedLight, range, intensity, scattering);
+	}
+
+	/// <summary>
+	/// Returns whether the current main light still matches its baked snapshot.
+	/// </summary>
+	/// <param name="mainLightIndex"></param>
+	/// <param name="visibleLights"></param>
+	/// <returns></returns>
+	private static bool IsMainLightStillEquivalentToBake(int mainLightIndex, NativeArray<VisibleLight> visibleLights)
+	{
+		const float DirectionDotThreshold = 0.9999f;
+		const float ColorEpsilonSq = 0.000001f;
+		if (hasStaticSceneStateChangedSinceBake || !bakedMainLight.isValid || mainLightIndex < 0 || mainLightIndex >= visibleLights.Length)
+			return false;
+
+		Light currentMainLight = visibleLights[mainLightIndex].light;
+		if (currentMainLight == null || !currentMainLight.enabled || !currentMainLight.gameObject.activeInHierarchy || !IsLightStaticForBake(currentMainLight))
+			return false;
+
+		if (currentMainLight.GetInstanceID() != bakedMainLight.lightInstanceId)
+			return false;
+
+		Vector3 currentDirection = -currentMainLight.transform.forward;
+		if (Vector3.Dot(currentDirection, bakedMainLight.direction) < DirectionDotThreshold)
+			return false;
+
+		Color linearColor = currentMainLight.color.linear;
+		Vector3 currentColor = new Vector3(linearColor.r, linearColor.g, linearColor.b) * currentMainLight.intensity;
+		if ((currentColor - bakedMainLight.color).sqrMagnitude > ColorEpsilonSq)
+			return false;
+
+		return true;
+	}
+
+	/// <summary>
 	/// Returns whether a visible light is a valid additional light candidate using baked static data when possible.
 	/// </summary>
 	/// <param name="visibleLight"></param>
@@ -1052,6 +1209,19 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		if (bakedLight.isStaticAtBake && bakedLight.bakedStaticLightIndex >= 0)
 		{
+			VolumetricAdditionalLight volumetricLight = bakedLight.volumetricLight;
+			float currentScattering = volumetricLight.Scattering;
+			float currentIntensity = light.intensity;
+			float currentRange = Mathf.Max(light.range, 0.01f);
+			if (IsStaticLightStillEquivalentToBake(light, volumetricLight, bakedLight, currentRange, currentIntensity, currentScattering))
+			{
+				if (!TryGetAdditionalLightCandidate(visibleLight, cameraPosition, fogDistance, fogMinHeight, fogMaxHeight, out anisotropy, out scattering, out radiusSq, out score, out lightPosition, out lightRange))
+					return false;
+
+				selectedAdditionalLightIndex = liveAdditionalLightIndex;
+				return true;
+			}
+
 			float range = Mathf.Max(bakedLight.range, 0.01f);
 			Vector3 bakedPosition = bakedLight.position;
 			float bakedMaxDistance = fogDistance + range;
@@ -1080,8 +1250,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			return true;
 		}
 
-		VolumetricAdditionalLight volumetricLight = bakedLight.volumetricLight;
-		float currentScattering = volumetricLight.Scattering;
+		VolumetricAdditionalLight volumetricLightDynamic = bakedLight.volumetricLight;
+		float currentScattering = volumetricLightDynamic.Scattering;
 		float currentIntensity = light.intensity;
 		float currentRange = Mathf.Max(light.range, 0.01f);
 		if (currentScattering <= MinAdditionalLightScattering || currentIntensity <= MinAdditionalLightIntensity)
@@ -1098,11 +1268,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (lightMaxY < fogMinHeight || lightMinY > fogMaxHeight)
 			return false;
 
-		bool useBakedConstants = AreBakedAdditionalLightConstantsStillValid(light, volumetricLight, bakedLight, currentRange, currentIntensity, currentScattering);
+		bool useBakedConstants = AreBakedAdditionalLightConstantsStillValid(light, volumetricLightDynamic, bakedLight, currentRange, currentIntensity, currentScattering);
 
-		anisotropy = useBakedConstants ? bakedLight.anisotropy : volumetricLight.Anisotropy;
+		anisotropy = useBakedConstants ? bakedLight.anisotropy : volumetricLightDynamic.Anisotropy;
 		scattering = useBakedConstants ? bakedLight.scattering : currentScattering;
-		radiusSq = useBakedConstants ? bakedLight.radiusSq : volumetricLight.Radius * volumetricLight.Radius;
+		radiusSq = useBakedConstants ? bakedLight.radiusSq : volumetricLightDynamic.Radius * volumetricLightDynamic.Radius;
 		lightRange = currentRange;
 		float spotFactor = light.type == LightType.Spot
 			? (useBakedConstants ? bakedLight.spotFactor : ComputeSpotLightScoreFactor(light.spotAngle))
@@ -1128,7 +1298,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (bakedLight.light != light || bakedLight.volumetricLight == null)
 			return false;
 
-		if (!bakedLight.volumetricLight.enabled || !bakedLight.volumetricLight.gameObject.activeInHierarchy)
+		if (!bakedLight.isStaticAtBake && (!bakedLight.volumetricLight.enabled || !bakedLight.volumetricLight.gameObject.activeInHierarchy))
 			return false;
 
 		return true;
