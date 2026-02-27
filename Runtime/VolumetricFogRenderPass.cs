@@ -5,6 +5,7 @@ using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 
 #if BURST_PRESENT
@@ -52,6 +53,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		public int froxelMaxLightsPerCell;
 
 		public NativeArray<int> froxelCellLightCounts;
+		[NativeDisableParallelForRestriction]
 		public NativeArray<int> froxelLightIndices;
 
 		public void Execute(int froxelIndex)
