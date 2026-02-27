@@ -69,7 +69,7 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	public ClampedIntParameter lightEvaluationStride = new ClampedIntParameter(2, 1, 4);
 	[Tooltip("Maximum additional lights considered during fog raymarching. Lower values improve performance in scenes with many lights.")]
 	public ClampedIntParameter maxAdditionalLights = new ClampedIntParameter(MaxVisibleAdditionalLights, 0, MaxVisibleAdditionalLights);
-	[Tooltip("The number of times that the fog texture will be blurred. Higher values lead to softer volumetric god rays at the cost of some performance.")]
+	[Tooltip("Integrated bilateral upsample denoise radius. Higher values smooth the low-resolution fog result more aggressively at the cost of some upsample shader work.")]
 	public ClampedIntParameter blurIterations = new ClampedIntParameter(2, 0, 4);
 	[Tooltip("When greater than zero, raymarching stops early once transmittance falls below this threshold. This improves performance in dense fog.")]
 	public ClampedFloatParameter transmittanceThreshold = new ClampedFloatParameter(0.0f, 0.0f, 1.0f);

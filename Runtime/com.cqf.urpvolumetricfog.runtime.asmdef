@@ -2,6 +2,10 @@
     "name": "com.cqf.urpvolumetricfog.runtime",
     "rootNamespace": "",
     "references": [
+        "Unity.Burst",
+        "Unity.Collections",
+        "Unity.Jobs",
+        "Unity.Mathematics",
         "Unity.RenderPipelines.Core.Runtime",
         "Unity.RenderPipelines.Universal.Runtime"
     ],

@@ -326,6 +326,10 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         transmittance *= stepAttenuation;
 
         UNITY_BRANCH
+        if (_TransmittanceThreshold > 0.0 && transmittance <= _TransmittanceThreshold)
+            break;
+
+        UNITY_BRANCH
         if (lightEvaluationCountdown <= 0)
         {
             half3 apvLighting = (half3)GetStepAdaptiveProbeVolumeLighting(uv, currPosWS);
@@ -342,10 +346,6 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         // TODO: Additional contributions? Reflection probes, etc...
         half3 stepColor = cachedStepLighting * (half)density;
         volumetricFogColor += ((float3)stepColor * (transmittance * stepLength));
-
-        UNITY_BRANCH
-        if (_TransmittanceThreshold > 0.0 && transmittance <= _TransmittanceThreshold)
-            break;
     }
 
     return float4(volumetricFogColor, transmittance);

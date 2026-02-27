@@ -7,6 +7,7 @@ using UnityEngine.Rendering.Universal;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
+using Unity.Mathematics;
 
 #if BURST_PRESENT
 using Unity.Burst;
@@ -39,6 +40,123 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		public int minZ;
 		public int maxZ;
 		public int isValid;
+	}
+
+	private struct FroxelLightInput
+	{
+		public float3 position;
+		public float range;
+	}
+
+#if BURST_PRESENT
+	[BurstCompile]
+#endif
+	private struct PrepareFroxelLightBoundsJob : IJobParallelFor
+	{
+		[ReadOnly] public NativeArray<FroxelLightInput> lightInputs;
+		public float nearPlane;
+		public float farPlane;
+		public float invLogDepthRange;
+		public int froxelGridWidth;
+		public int froxelGridHeight;
+		public int froxelGridDepth;
+		public float3 cameraRight;
+		public float3 cameraUp;
+		public float4x4 viewMatrix;
+		public float4x4 viewProjectionMatrix;
+
+		public NativeArray<FroxelLightBounds> lightBounds;
+
+		public void Execute(int compactLightIndex)
+		{
+			FroxelLightInput lightInput = lightInputs[compactLightIndex];
+			FroxelLightBounds bounds = default;
+			bounds.compactLightIndex = compactLightIndex;
+
+			float3 lightPosition = lightInput.position;
+			float lightRange = math.max(lightInput.range, 0.01f);
+			float4 lightPositionView = math.mul(viewMatrix, new float4(lightPosition, 1.0f));
+			float lightEyeDepth = -lightPositionView.z;
+
+			float minDepth = math.max(nearPlane, lightEyeDepth - lightRange);
+			float maxDepth = math.min(farPlane, lightEyeDepth + lightRange);
+			if (maxDepth <= minDepth)
+			{
+				lightBounds[compactLightIndex] = bounds;
+				return;
+			}
+
+			bounds.minZ = DepthToFroxelSlice(minDepth, nearPlane, invLogDepthRange, froxelGridDepth);
+			bounds.maxZ = DepthToFroxelSlice(maxDepth, nearPlane, invLogDepthRange, froxelGridDepth);
+			if (bounds.maxZ < bounds.minZ)
+			{
+				lightBounds[compactLightIndex] = bounds;
+				return;
+			}
+
+			if (!TryGetLightScreenBounds(lightPosition, lightRange, cameraRight, cameraUp, viewProjectionMatrix, out float minU, out float maxU, out float minV, out float maxV))
+			{
+				lightBounds[compactLightIndex] = bounds;
+				return;
+			}
+
+			bounds.minX = math.clamp((int)math.floor(minU * froxelGridWidth), 0, froxelGridWidth - 1);
+			bounds.maxX = math.clamp((int)math.floor(maxU * froxelGridWidth), 0, froxelGridWidth - 1);
+			bounds.minY = math.clamp((int)math.floor(minV * froxelGridHeight), 0, froxelGridHeight - 1);
+			bounds.maxY = math.clamp((int)math.floor(maxV * froxelGridHeight), 0, froxelGridHeight - 1);
+			if (bounds.maxX < bounds.minX || bounds.maxY < bounds.minY)
+			{
+				lightBounds[compactLightIndex] = bounds;
+				return;
+			}
+
+			bounds.isValid = 1;
+			lightBounds[compactLightIndex] = bounds;
+		}
+
+		private static int DepthToFroxelSlice(float eyeDepth, float nearPlane, float inverseLogDepthRange, int froxelGridDepth)
+		{
+			float normalizedDepth = math.log(math.max(eyeDepth / nearPlane, 1.0f)) * inverseLogDepthRange;
+			int slice = (int)math.floor(normalizedDepth * froxelGridDepth);
+			return math.clamp(slice, 0, froxelGridDepth - 1);
+		}
+
+		private static bool TryGetLightScreenBounds(float3 lightPosition, float lightRange, float3 cameraRight, float3 cameraUp, float4x4 viewProjectionMatrix, out float minU, out float maxU, out float minV, out float maxV)
+		{
+			minU = 0.0f;
+			maxU = 1.0f;
+			minV = 0.0f;
+			maxV = 1.0f;
+
+			float4 clipCenter = math.mul(viewProjectionMatrix, new float4(lightPosition, 1.0f));
+			if (clipCenter.w <= 0.0001f)
+				return false;
+
+			float2 ndcCenter = clipCenter.xy / clipCenter.w;
+			float4 clipRight = math.mul(viewProjectionMatrix, new float4(lightPosition + (cameraRight * lightRange), 1.0f));
+			float4 clipUp = math.mul(viewProjectionMatrix, new float4(lightPosition + (cameraUp * lightRange), 1.0f));
+			if (clipRight.w <= 0.0001f || clipUp.w <= 0.0001f)
+				return false;
+
+			float2 ndcRight = clipRight.xy / clipRight.w;
+			float2 ndcUp = clipUp.xy / clipUp.w;
+			float radiusX = math.abs(ndcRight.x - ndcCenter.x);
+			float radiusY = math.abs(ndcUp.y - ndcCenter.y);
+			float radius = math.max(math.max(radiusX, radiusY), 0.001f);
+
+			float minNdcX = ndcCenter.x - radius;
+			float maxNdcX = ndcCenter.x + radius;
+			float minNdcY = ndcCenter.y - radius;
+			float maxNdcY = ndcCenter.y + radius;
+			if (maxNdcX < -1.0f || minNdcX > 1.0f || maxNdcY < -1.0f || minNdcY > 1.0f)
+				return false;
+
+			minU = math.saturate(minNdcX * 0.5f + 0.5f);
+			maxU = math.saturate(maxNdcX * 0.5f + 0.5f);
+			minV = math.saturate(minNdcY * 0.5f + 0.5f);
+			maxV = math.saturate(maxNdcY * 0.5f + 0.5f);
+			return true;
+		}
 	}
 
 #if BURST_PRESENT
@@ -168,6 +286,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int TintId = Shader.PropertyToID("_Tint");
 	private static readonly int MaxStepsId = Shader.PropertyToID("_MaxSteps");
 	private static readonly int LightEvaluationStrideId = Shader.PropertyToID("_LightEvaluationStride");
+	private static readonly int UpsampleBilateralRadiusId = Shader.PropertyToID("_UpsampleBilateralRadius");
 	private static readonly int TransmittanceThresholdId = Shader.PropertyToID("_TransmittanceThreshold");
 	private static readonly int FroxelGridDimensionsId = Shader.PropertyToID("_FroxelGridDimensions");
 	private static readonly int FroxelNearFarId = Shader.PropertyToID("_FroxelNearFar");
@@ -185,6 +304,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private const int FroxelGridDepth = 24;
 	private const int FroxelMaxLightsPerCell = 24;
 	private const int FroxelCount = FroxelGridWidth * FroxelGridHeight * FroxelGridDepth;
+	private const int FroxelBuildJobBatchSize = 64;
+	private const float FullFroxelMetaUploadThreshold = 0.5f;
+	private const float FullFroxelLightIndicesUploadThreshold = 0.75f;
 	private const int FroxelRebuildMinFrameInterval = 2;
 	private const float FroxelHashPositionQuantization = 0.125f;
 	private const float FroxelHashDirectionQuantization = 0.01f;
@@ -221,6 +343,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 	private static ComputeBuffer froxelMetaBuffer;
 	private static ComputeBuffer froxelLightIndicesBuffer;
+	private static NativeArray<FroxelLightInput> froxelLightInputsNative;
 	private static NativeArray<FroxelLightBounds> froxelLightBoundsNative;
 	private static NativeArray<int> froxelCellLightCountsNative;
 	private static NativeArray<int> froxelLightIndicesNative;
@@ -278,6 +401,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static Color cachedTint;
 	private static int cachedMaxSteps;
 	private static int cachedLightEvaluationStride;
+	private static int cachedUpsampleBilateralRadius;
 	private static float cachedTransmittanceThreshold;
 
 	#endregion
@@ -387,7 +511,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		RenderTextureFormat originalColorFormat = cameraTargetDescriptor.colorFormat;
 		Vector2Int originalResolution = new Vector2Int(cameraTargetDescriptor.width, cameraTargetDescriptor.height);
 		int downsampleFactor = GetDownsampleFactor(fogVolume);
-		int blurIterations = fogVolume != null ? fogVolume.blurIterations.value : 0;
 		GraphicsFormat downsampledDepthFormat = GetDownsampledDepthGraphicsFormat();
 
 		cameraTargetDescriptor.width = Mathf.Max(1, cameraTargetDescriptor.width / downsampleFactor);
@@ -397,11 +520,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		cameraTargetDescriptor.colorFormat = RenderTextureFormat.ARGBHalf;
 		ReAllocateIfNeeded(ref volumetricFogRenderRTHandle, cameraTargetDescriptor, wrapMode: TextureWrapMode.Clamp, name: VolumetricFogRenderRTName);
-		if (blurIterations > 0)
-		{
-			ReAllocateIfNeeded(ref volumetricFogBlurRTHandle, cameraTargetDescriptor, wrapMode: TextureWrapMode.Clamp, name: VolumetricFogBlurRTName);
-		}
-		else if (volumetricFogBlurRTHandle != null)
+		if (volumetricFogBlurRTHandle != null)
 		{
 			volumetricFogBlurRTHandle.Release();
 			volumetricFogBlurRTHandle = null;
@@ -439,14 +558,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			UpdateVolumetricFogMaterialParameters(volumetricFogMaterial, fogVolume, renderingData.cameraData.camera, cameraPosition, renderingData.lightData.mainLightIndex, renderingData.lightData.additionalLightsCount, renderingData.lightData.visibleLights, sceneViewMainCameraFrustumMaskEnabled, mainCameraFrustumPlanes);
 			Blitter.BlitCameraTexture(cmd, volumetricFogRenderRTHandle, volumetricFogRenderRTHandle, volumetricFogMaterial, volumetricFogRenderPassIndex);
 
-			int blurIterations = fogVolume != null ? fogVolume.blurIterations.value : 0;
-
-			for (int i = 0; i < blurIterations; ++i)
-			{
-				Blitter.BlitCameraTexture(cmd, volumetricFogRenderRTHandle, volumetricFogBlurRTHandle, volumetricFogMaterial, volumetricFogHorizontalBlurPassIndex);
-				Blitter.BlitCameraTexture(cmd, volumetricFogBlurRTHandle, volumetricFogRenderRTHandle, volumetricFogMaterial, volumetricFogVerticalBlurPassIndex);
-			}
-
 			volumetricFogMaterial.SetTexture(VolumetricFogTextureId, volumetricFogRenderRTHandle);
 
 			RTHandle cameraColorRt = renderingData.cameraData.renderer.cameraColorTargetHandle;
@@ -475,7 +586,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		UniversalLightData lightData = frameData.Get<UniversalLightData>();
 		UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
 		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
-		int blurIterations = fogVolume != null ? fogVolume.blurIterations.value : 0;
 		Camera sceneCamera = cameraData.camera;
 		Vector3 cameraPosition = sceneCamera != null ? sceneCamera.transform.position : Vector3.zero;
 		ApplySceneViewMainCameraMaskParameters(volumetricFogMaterial);
@@ -517,24 +627,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			if (resourceData.additionalShadowsTexture.IsValid())
 				builder.UseTexture(resourceData.additionalShadowsTexture);
 			builder.SetRenderFunc((PassData data, RasterGraphContext context) => ExecutePass(data, context));
-		}
-
-		if (blurIterations > 0)
-		{
-			using (IUnsafeRenderGraphBuilder builder = renderGraph.AddUnsafePass("Volumetric Fog Blur Pass", out PassData passData, profilingSampler))
-			{
-				passData.stage = PassStage.VolumetricFogBlur;
-				passData.source = volumetricFogRenderTarget;
-				passData.target = volumetricFogBlurRenderTarget;
-				passData.material = volumetricFogMaterial;
-				passData.materialPassIndex = volumetricFogHorizontalBlurPassIndex;
-				passData.materialAdditionalPassIndex = volumetricFogVerticalBlurPassIndex;
-				passData.blurIterations = blurIterations;
-
-				builder.UseTexture(volumetricFogRenderTarget, AccessFlags.ReadWrite);
-				builder.UseTexture(volumetricFogBlurRenderTarget, AccessFlags.ReadWrite);
-				builder.SetRenderFunc((PassData data, UnsafeGraphContext context) => ExecuteUnsafeBlurPass(data, context));
-			}
 		}
 
 		using (IRasterRenderGraphBuilder builder = renderGraph.AddRasterRenderPass("Volumetric Fog Upsample Composition Pass", out PassData passData, profilingSampler))
@@ -662,6 +754,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		SetColorIfChanged(volumetricFogMaterial, TintId, fogVolume.tint.value, ref cachedTint);
 		SetIntIfChanged(volumetricFogMaterial, MaxStepsId, fogVolume.maxSteps.value, ref cachedMaxSteps);
 		SetIntIfChanged(volumetricFogMaterial, LightEvaluationStrideId, fogVolume.lightEvaluationStride.value, ref cachedLightEvaluationStride);
+		SetIntIfChanged(volumetricFogMaterial, UpsampleBilateralRadiusId, fogVolume.blurIterations.value, ref cachedUpsampleBilateralRadius);
 		SetFloatIfChanged(volumetricFogMaterial, TransmittanceThresholdId, fogVolume.transmittanceThreshold.value, ref cachedTransmittanceThreshold);
 
 		if (enableMainLightContribution || effectiveAdditionalLightsCount > 0)
@@ -987,7 +1080,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (froxelMetaBuffer == null || froxelMetaBuffer.count != FroxelCount || froxelMetaBuffer.stride != sizeof(int) * 2)
 		{
 			froxelMetaBuffer?.Release();
-			froxelMetaBuffer = new ComputeBuffer(FroxelCount, sizeof(int) * 2, ComputeBufferType.Structured);
+			froxelMetaBuffer = new ComputeBuffer(FroxelCount, sizeof(int) * 2, ComputeBufferType.Structured, ComputeBufferMode.SubUpdates);
 			needsFullFroxelMetaUpload = true;
 		}
 
@@ -995,7 +1088,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (froxelLightIndicesBuffer == null || froxelLightIndicesBuffer.count != froxelLightIndicesCount || froxelLightIndicesBuffer.stride != sizeof(int))
 		{
 			froxelLightIndicesBuffer?.Release();
-			froxelLightIndicesBuffer = new ComputeBuffer(froxelLightIndicesCount, sizeof(int), ComputeBufferType.Structured);
+			froxelLightIndicesBuffer = new ComputeBuffer(froxelLightIndicesCount, sizeof(int), ComputeBufferType.Structured, ComputeBufferMode.SubUpdates);
 			needsFullFroxelMetaUpload = true;
 		}
 	}
@@ -1005,6 +1098,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// </summary>
 	private static void EnsureFroxelJobDataAllocated()
 	{
+		if (!froxelLightInputsNative.IsCreated || froxelLightInputsNative.Length != MaxVisibleAdditionalLights)
+		{
+			if (froxelLightInputsNative.IsCreated)
+				froxelLightInputsNative.Dispose();
+
+			froxelLightInputsNative = new NativeArray<FroxelLightInput>(MaxVisibleAdditionalLights, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
+		}
+
 		if (!froxelLightBoundsNative.IsCreated || froxelLightBoundsNative.Length != MaxVisibleAdditionalLights)
 		{
 			if (froxelLightBoundsNative.IsCreated)
@@ -1067,58 +1168,33 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	{
 		float near = Mathf.Max(camera.nearClipPlane, 0.01f);
 		float far = Mathf.Max(camera.farClipPlane, near + 0.01f);
-		Matrix4x4 viewMatrix = camera.worldToCameraMatrix;
-		Matrix4x4 viewProjectionMatrix = camera.projectionMatrix * viewMatrix;
-		Vector3 cameraRight = camera.transform.right;
-		Vector3 cameraUp = camera.transform.up;
 		float invLogDepthRange = 1.0f / Mathf.Max(Mathf.Log(far / near), 0.0001f);
 
 		for (int compactLightIndex = 0; compactLightIndex < selectedAdditionalLightsCount; ++compactLightIndex)
 		{
 			Vector3 lightPosition = SelectedLightPositions[compactLightIndex];
-			float lightRange = Mathf.Max(SelectedLightRanges[compactLightIndex], 0.01f);
-			FroxelLightBounds bounds = default;
-			bounds.compactLightIndex = compactLightIndex;
-			bounds.isValid = 0;
-
-			Vector3 lightPositionView = viewMatrix.MultiplyPoint(lightPosition);
-			float lightEyeDepth = -lightPositionView.z;
-
-			float minDepth = Mathf.Max(near, lightEyeDepth - lightRange);
-			float maxDepth = Mathf.Min(far, lightEyeDepth + lightRange);
-			if (maxDepth <= minDepth)
+			froxelLightInputsNative[compactLightIndex] = new FroxelLightInput
 			{
-				froxelLightBoundsNative[compactLightIndex] = bounds;
-				continue;
-			}
-
-			bounds.minZ = DepthToFroxelSlice(minDepth, near, invLogDepthRange);
-			bounds.maxZ = DepthToFroxelSlice(maxDepth, near, invLogDepthRange);
-			if (bounds.maxZ < bounds.minZ)
-			{
-				froxelLightBoundsNative[compactLightIndex] = bounds;
-				continue;
-			}
-
-			if (!TryGetLightScreenBounds(lightPosition, lightRange, cameraRight, cameraUp, viewProjectionMatrix, out float minU, out float maxU, out float minV, out float maxV))
-			{
-				froxelLightBoundsNative[compactLightIndex] = bounds;
-				continue;
-			}
-
-			bounds.minX = Mathf.Clamp(Mathf.FloorToInt(minU * FroxelGridWidth), 0, FroxelGridWidth - 1);
-			bounds.maxX = Mathf.Clamp(Mathf.FloorToInt(maxU * FroxelGridWidth), 0, FroxelGridWidth - 1);
-			bounds.minY = Mathf.Clamp(Mathf.FloorToInt(minV * FroxelGridHeight), 0, FroxelGridHeight - 1);
-			bounds.maxY = Mathf.Clamp(Mathf.FloorToInt(maxV * FroxelGridHeight), 0, FroxelGridHeight - 1);
-			if (bounds.maxX < bounds.minX || bounds.maxY < bounds.minY)
-			{
-				froxelLightBoundsNative[compactLightIndex] = bounds;
-				continue;
-			}
-
-			bounds.isValid = 1;
-			froxelLightBoundsNative[compactLightIndex] = bounds;
+				position = new float3(lightPosition.x, lightPosition.y, lightPosition.z),
+				range = SelectedLightRanges[compactLightIndex]
+			};
 		}
+
+		PrepareFroxelLightBoundsJob prepareFroxelLightBoundsJob = new PrepareFroxelLightBoundsJob
+		{
+			lightInputs = froxelLightInputsNative,
+			nearPlane = near,
+			farPlane = far,
+			invLogDepthRange = invLogDepthRange,
+			froxelGridWidth = FroxelGridWidth,
+			froxelGridHeight = FroxelGridHeight,
+			froxelGridDepth = FroxelGridDepth,
+			cameraRight = new float3(camera.transform.right.x, camera.transform.right.y, camera.transform.right.z),
+			cameraUp = new float3(camera.transform.up.x, camera.transform.up.y, camera.transform.up.z),
+			viewMatrix = ToFloat4x4(camera.worldToCameraMatrix),
+			viewProjectionMatrix = ToFloat4x4(camera.projectionMatrix * camera.worldToCameraMatrix),
+			lightBounds = froxelLightBoundsNative
+		};
 
 		BuildFroxelClustersJob buildFroxelClustersJob = new BuildFroxelClustersJob
 		{
@@ -1131,7 +1207,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			froxelLightIndices = froxelLightIndicesNative
 		};
 
-		buildFroxelClustersJob.Schedule(FroxelCount, FroxelGridWidth).Complete();
+		JobHandle prepareFroxelLightBoundsHandle = prepareFroxelLightBoundsJob.Schedule(selectedAdditionalLightsCount, 32);
+		buildFroxelClustersJob.Schedule(FroxelCount, FroxelBuildJobBatchSize, prepareFroxelLightBoundsHandle).Complete();
 		FinalizeFroxelClustersFromJobResults();
 	}
 
@@ -1741,6 +1818,12 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (dirtyFroxelMetaCellCount <= 0)
 			return;
 
+		if (dirtyFroxelMetaCellCount >= Mathf.CeilToInt(FroxelCount * FullFroxelMetaUploadThreshold))
+		{
+			froxelMetaBuffer.SetData(FroxelMetas);
+			return;
+		}
+
 		int rangeStart = DirtyFroxelMetaCells[0];
 		int previous = rangeStart;
 		for (int i = 1; i < dirtyFroxelMetaCellCount; ++i)
@@ -1766,6 +1849,12 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	{
 		if (activeFroxelCellCount <= 0)
 			return;
+
+		if (activeFroxelCellCount >= Mathf.CeilToInt(FroxelCount * FullFroxelLightIndicesUploadThreshold))
+		{
+			froxelLightIndicesBuffer.SetData(FroxelLightIndices);
+			return;
+		}
 
 		int rangeStartCell = ActiveFroxelCells[0];
 		int previousCell = rangeStartCell;
@@ -1818,6 +1907,20 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			hash = (hash * 31) + QuantizeFloatForHash(value.z, quantization);
 			return hash;
 		}
+	}
+
+	/// <summary>
+	/// Converts a Unity matrix into a float4x4 for Burst-compatible jobs.
+	/// </summary>
+	/// <param name="matrix"></param>
+	/// <returns></returns>
+	private static float4x4 ToFloat4x4(Matrix4x4 matrix)
+	{
+		return new float4x4(
+			new float4(matrix.m00, matrix.m10, matrix.m20, matrix.m30),
+			new float4(matrix.m01, matrix.m11, matrix.m21, matrix.m31),
+			new float4(matrix.m02, matrix.m12, matrix.m22, matrix.m32),
+			new float4(matrix.m03, matrix.m13, matrix.m23, matrix.m33));
 	}
 
 	/// <summary>
@@ -1923,6 +2026,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedTint = new Color(float.NaN, float.NaN, float.NaN, float.NaN);
 		cachedMaxSteps = int.MinValue;
 		cachedLightEvaluationStride = int.MinValue;
+		cachedUpsampleBilateralRadius = int.MinValue;
 		cachedTransmittanceThreshold = float.NaN;
 		CachedVolumetricAdditionalLights.Clear();
 	}
@@ -1937,6 +2041,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		froxelLightIndicesBuffer?.Release();
 		froxelLightIndicesBuffer = null;
+		if (froxelLightInputsNative.IsCreated)
+			froxelLightInputsNative.Dispose();
 		if (froxelLightBoundsNative.IsCreated)
 			froxelLightBoundsNative.Dispose();
 		if (froxelCellLightCountsNative.IsCreated)
@@ -1965,7 +2071,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		RenderTextureFormat originalColorFormat = cameraTargetDescriptor.colorFormat;
 		Vector2Int originalResolution = new Vector2Int(cameraTargetDescriptor.width, cameraTargetDescriptor.height);
 		int downsampleFactor = GetDownsampleFactor(fogVolume);
-		int blurIterations = fogVolume != null ? fogVolume.blurIterations.value : 0;
 		GraphicsFormat downsampledDepthFormat = GetDownsampledDepthGraphicsFormat();
 
 		cameraTargetDescriptor.width = Mathf.Max(1, cameraTargetDescriptor.width / downsampleFactor);
@@ -1975,7 +2080,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		cameraTargetDescriptor.colorFormat = RenderTextureFormat.ARGBHalf;
 		volumetricFogRenderTarget = UniversalRenderer.CreateRenderGraphTexture(renderGraph, cameraTargetDescriptor, VolumetricFogRenderRTName, false);
-		volumetricFogBlurRenderTarget = blurIterations > 0 ? UniversalRenderer.CreateRenderGraphTexture(renderGraph, cameraTargetDescriptor, VolumetricFogBlurRTName, false) : default;
+		volumetricFogBlurRenderTarget = default;
 
 		cameraTargetDescriptor.width = originalResolution.x;
 		cameraTargetDescriptor.height = originalResolution.y;
