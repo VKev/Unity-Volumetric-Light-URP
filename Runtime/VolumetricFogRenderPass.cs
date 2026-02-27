@@ -121,6 +121,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private const int FroxelGridDepth = 24;
 	private const int FroxelMaxLightsPerCell = 24;
 	private const int FroxelCount = FroxelGridWidth * FroxelGridHeight * FroxelGridDepth;
+	private const int FroxelRebuildMinFrameInterval = 2;
+	private const float FroxelHashPositionQuantization = 0.125f;
+	private const float FroxelHashDirectionQuantization = 0.01f;
+	private const float FroxelHashRangeQuantization = 0.125f;
 	private const float MinAdditionalLightScattering = 0.0001f;
 	private const float MinAdditionalLightIntensity = 0.001f;
 	private static int LightsParametersLength = MaxVisibleAdditionalLights + 1;
@@ -140,6 +144,20 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly FroxelMeta[] FroxelMetas = new FroxelMeta[FroxelCount];
 	private static readonly int[] FroxelLightIndices = new int[FroxelCount * FroxelMaxLightsPerCell];
 	private static readonly int[] FroxelCellLightCounts = new int[FroxelCount];
+	private static readonly int[] ActiveFroxelCells = new int[FroxelCount];
+	private static readonly int[] TouchedFroxelCells = new int[FroxelCount];
+	private static readonly int[] DirtyFroxelMetaCells = new int[FroxelCount];
+	private static readonly int[] FroxelCellBuildStamps = new int[FroxelCount];
+	private static readonly int[] FroxelCellDirtyStamps = new int[FroxelCount];
+
+	private static int activeFroxelCellCount;
+	private static int dirtyFroxelMetaCellCount;
+	private static int froxelBuildStamp;
+	private static int froxelDirtyStamp;
+	private static int cachedFroxelBuildFrame = int.MinValue;
+	private static int cachedFroxelStructuralHash = int.MinValue;
+	private static bool froxelMetaOffsetsInitialized;
+	private static bool needsFullFroxelMetaUpload = true;
 
 	private static ComputeBuffer froxelMetaBuffer;
 	private static ComputeBuffer froxelLightIndicesBuffer;
@@ -594,8 +612,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			cachedFroxelClusteredLightsEnabled = enableFroxelClusteredLights;
 		}
 
-		cachedFroxelHash = froxelHash;
-
 		isMaterialStateInitialized = true;
 	}
 
@@ -826,17 +842,27 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (froxelMetaBuffer == null || froxelLightIndicesBuffer == null)
 			return false;
 
-		if (!isMaterialStateInitialized || froxelHash != cachedFroxelHash)
+		int froxelStructuralHash = ComputeFroxelStructuralHash(camera, selectedAdditionalLightsCount);
+		if (ShouldRebuildFroxelClusters(froxelHash, froxelStructuralHash))
 		{
 			BuildFroxelClusters(camera, selectedAdditionalLightsCount);
-			froxelMetaBuffer.SetData(FroxelMetas);
-			froxelLightIndicesBuffer.SetData(FroxelLightIndices);
+			UploadFroxelClusterData();
+			cachedFroxelHash = froxelHash;
+			cachedFroxelStructuralHash = froxelStructuralHash;
+			cachedFroxelBuildFrame = Time.renderedFrameCount;
+		}
+		else
+		{
+			froxelHash = cachedFroxelHash;
 		}
 
 		material.SetBuffer(FroxelMetaBufferId, froxelMetaBuffer);
 		material.SetBuffer(FroxelLightIndicesBufferId, froxelLightIndicesBuffer);
 		material.SetVector(FroxelGridDimensionsId, new Vector4(FroxelGridWidth, FroxelGridHeight, FroxelGridDepth, FroxelMaxLightsPerCell));
-		material.SetVector(FroxelNearFarId, new Vector4(camera.nearClipPlane, camera.farClipPlane, 0.0f, 0.0f));
+		float near = Mathf.Max(camera.nearClipPlane, 0.01f);
+		float far = Mathf.Max(camera.farClipPlane, near + 0.01f);
+		float invLogDepthRange = 1.0f / Mathf.Max(Mathf.Log(far / near), 0.0001f);
+		material.SetVector(FroxelNearFarId, new Vector4(near, far, invLogDepthRange, 0.0f));
 		DrawFroxelDebug(camera, debugRestrictToMainCameraFrustum, debugMainCameraFrustumPlanes);
 
 		return true;
@@ -847,10 +873,13 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// </summary>
 	private static void EnsureFroxelBuffersAllocated()
 	{
+		InitializeFroxelMetaOffsets();
+
 		if (froxelMetaBuffer == null || froxelMetaBuffer.count != FroxelCount || froxelMetaBuffer.stride != sizeof(int) * 2)
 		{
 			froxelMetaBuffer?.Release();
 			froxelMetaBuffer = new ComputeBuffer(FroxelCount, sizeof(int) * 2, ComputeBufferType.Structured);
+			needsFullFroxelMetaUpload = true;
 		}
 
 		int froxelLightIndicesCount = FroxelCount * FroxelMaxLightsPerCell;
@@ -858,6 +887,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		{
 			froxelLightIndicesBuffer?.Release();
 			froxelLightIndicesBuffer = new ComputeBuffer(froxelLightIndicesCount, sizeof(int), ComputeBufferType.Structured);
+			needsFullFroxelMetaUpload = true;
 		}
 	}
 
@@ -868,9 +898,17 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="selectedAdditionalLightsCount"></param>
 	private static void BuildFroxelClusters(Camera camera, int selectedAdditionalLightsCount)
 	{
-		Array.Clear(FroxelCellLightCounts, 0, FroxelCellLightCounts.Length);
-		for (int i = 0; i < FroxelLightIndices.Length; ++i)
-			FroxelLightIndices[i] = -1;
+		int buildStamp = NextFroxelStamp(ref froxelBuildStamp, FroxelCellBuildStamps);
+		int dirtyStamp = NextFroxelStamp(ref froxelDirtyStamp, FroxelCellDirtyStamps);
+		dirtyFroxelMetaCellCount = 0;
+
+		for (int i = 0; i < activeFroxelCellCount; ++i)
+		{
+			int froxelIndex = ActiveFroxelCells[i];
+			FroxelCellLightCounts[froxelIndex] = 0;
+			FroxelMetas[froxelIndex].count = 0;
+			MarkFroxelMetaDirty(froxelIndex, dirtyStamp);
+		}
 
 		float near = Mathf.Max(camera.nearClipPlane, 0.01f);
 		float far = Mathf.Max(camera.farClipPlane, near + 0.01f);
@@ -879,6 +917,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		Matrix4x4 viewProjectionMatrix = camera.projectionMatrix * viewMatrix;
 		Vector3 cameraRight = camera.transform.right;
 		Vector3 cameraUp = camera.transform.up;
+		int touchedFroxelCellCount = 0;
 
 		int froxelPlaneStride = FroxelGridWidth * FroxelGridHeight;
 		float invLogDepthRange = 1.0f / Mathf.Max(Mathf.Log(far / near), 0.0001f);
@@ -920,6 +959,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 					for (int x = minX; x <= maxX; ++x)
 					{
 						int froxelIndex = froxelRowBase + x;
+						if (FroxelCellBuildStamps[froxelIndex] != buildStamp)
+						{
+							FroxelCellBuildStamps[froxelIndex] = buildStamp;
+							TouchedFroxelCells[touchedFroxelCellCount] = froxelIndex;
+							touchedFroxelCellCount++;
+							MarkFroxelMetaDirty(froxelIndex, dirtyStamp);
+						}
+
 						int count = FroxelCellLightCounts[froxelIndex];
 						if (count >= FroxelMaxLightsPerCell)
 							continue;
@@ -932,11 +979,19 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			}
 		}
 
-		for (int i = 0; i < FroxelCount; ++i)
+		if (touchedFroxelCellCount > 1)
+			Array.Sort(TouchedFroxelCells, 0, touchedFroxelCellCount);
+
+		for (int i = 0; i < touchedFroxelCellCount; ++i)
 		{
-			FroxelMetas[i].offset = i * FroxelMaxLightsPerCell;
-			FroxelMetas[i].count = FroxelCellLightCounts[i];
+			int froxelIndex = TouchedFroxelCells[i];
+			FroxelMetas[froxelIndex].count = FroxelCellLightCounts[froxelIndex];
+			ActiveFroxelCells[i] = froxelIndex;
 		}
+
+		activeFroxelCellCount = touchedFroxelCellCount;
+		if (dirtyFroxelMetaCellCount > 1)
+			Array.Sort(DirtyFroxelMetaCells, 0, dirtyFroxelMetaCellCount);
 	}
 
 	/// <summary>
@@ -1094,6 +1149,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="camera"></param>
 	private static void DrawWorldSpaceSolidCube(Vector3 center, float halfExtent, Color color, Camera camera)
 	{
+#if !UNITY_EDITOR
+		return;
+#else
 		if (camera == null || debugWorldSpaceCubeFillOpacity <= 0.0f || debugSolidCubeDrawCount >= debugSolidCubeDraws.Length)
 			return;
 
@@ -1101,6 +1159,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		debugSolidCubeDraws[debugSolidCubeDrawCount].halfExtent = halfExtent;
 		debugSolidCubeDraws[debugSolidCubeDrawCount].color = color;
 		debugSolidCubeDrawCount++;
+#endif
 	}
 
 	/// <summary>
@@ -1110,6 +1169,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="camera"></param>
 	private static void DrawQueuedDebugSolidCubes(CommandBuffer cmd, Camera camera)
 	{
+#if !UNITY_EDITOR
+		debugSolidCubeDrawCount = 0;
+		return;
+#else
 		if (cmd == null || camera == null || debugSolidCubeDrawCount <= 0 || debugWorldSpaceCubeFillOpacity <= 0.0f)
 		{
 			debugSolidCubeDrawCount = 0;
@@ -1140,6 +1203,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		}
 
 		debugSolidCubeDrawCount = 0;
+#endif
 	}
 
 #if UNITY_6000_0_OR_NEWER
@@ -1150,6 +1214,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="camera"></param>
 	private static void DrawQueuedDebugSolidCubes(RasterCommandBuffer cmd, Camera camera)
 	{
+#if !UNITY_EDITOR
+		debugSolidCubeDrawCount = 0;
+		return;
+#else
 		if (camera == null || debugSolidCubeDrawCount <= 0 || debugWorldSpaceCubeFillOpacity <= 0.0f)
 		{
 			debugSolidCubeDrawCount = 0;
@@ -1180,6 +1248,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		}
 
 		debugSolidCubeDrawCount = 0;
+#endif
 	}
 #endif
 
@@ -1189,6 +1258,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <returns></returns>
 	private static bool EnsureDebugSolidCubeResources()
 	{
+#if !UNITY_EDITOR
+		return false;
+#else
 		if (debugSolidCubeMaterial == null)
 		{
 			Shader debugShader = Shader.Find("Hidden/VolumetricFogDebugSolid");
@@ -1219,6 +1291,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			debugUnitCubeMesh = CreateUnitCubeMesh();
 
 		return debugSolidCubeMaterial != null && debugUnitCubeMesh != null;
+#endif
 	}
 
 	/// <summary>
@@ -1227,6 +1300,9 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <returns></returns>
 	private static Mesh CreateUnitCubeMesh()
 	{
+#if !UNITY_EDITOR
+		return null;
+#else
 		Mesh mesh = new Mesh();
 		mesh.name = "VolumetricFogDebugUnitCube";
 
@@ -1257,6 +1333,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		mesh.RecalculateBounds();
 		mesh.UploadMeshData(true);
 		return mesh;
+#endif
 	}
 
 	/// <summary>
@@ -1264,6 +1341,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// </summary>
 	private static void ReleaseDebugSolidCubeResources()
 	{
+#if !UNITY_EDITOR
+		debugSolidCubePropertyBlock = null;
+		debugSolidCubeDrawCount = 0;
+#else
 		CoreUtils.Destroy(debugSolidCubeMaterial);
 		debugSolidCubeMaterial = null;
 
@@ -1278,6 +1359,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		debugUnitCubeMesh = null;
 		debugSolidCubePropertyBlock = null;
 		debugSolidCubeDrawCount = 0;
+#endif
 	}
 
 	/// <summary>
@@ -1413,18 +1495,220 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		{
 			int hash = 17;
 			hash = (hash * 31) + selectedAdditionalLightsCount;
-			hash = (hash * 31) + camera.transform.position.GetHashCode();
-			hash = (hash * 31) + camera.transform.rotation.GetHashCode();
-			hash = (hash * 31) + camera.nearClipPlane.GetHashCode();
-			hash = (hash * 31) + camera.farClipPlane.GetHashCode();
+			hash = (hash * 31) + QuantizeVector3ForHash(camera.transform.position, FroxelHashPositionQuantization);
+			hash = (hash * 31) + QuantizeVector3ForHash(camera.transform.forward, FroxelHashDirectionQuantization);
+			hash = (hash * 31) + QuantizeVector3ForHash(camera.transform.up, FroxelHashDirectionQuantization);
 
 			for (int i = 0; i < selectedAdditionalLightsCount; ++i)
 			{
 				hash = (hash * 31) + SelectedAdditionalIndices[i];
-				hash = (hash * 31) + SelectedLightPositions[i].GetHashCode();
-				hash = (hash * 31) + SelectedLightRanges[i].GetHashCode();
+				hash = (hash * 31) + QuantizeVector3ForHash(SelectedLightPositions[i], FroxelHashPositionQuantization);
+				hash = (hash * 31) + QuantizeFloatForHash(SelectedLightRanges[i], FroxelHashRangeQuantization);
 			}
 
+			return hash;
+		}
+	}
+
+	/// <summary>
+	/// Computes the non-throttled froxel hash for structural changes that need an immediate rebuild.
+	/// </summary>
+	/// <param name="camera"></param>
+	/// <param name="selectedAdditionalLightsCount"></param>
+	/// <returns></returns>
+	private static int ComputeFroxelStructuralHash(Camera camera, int selectedAdditionalLightsCount)
+	{
+		unchecked
+		{
+			int hash = 17;
+			hash = (hash * 31) + selectedAdditionalLightsCount;
+			hash = (hash * 31) + camera.nearClipPlane.GetHashCode();
+			hash = (hash * 31) + camera.farClipPlane.GetHashCode();
+			hash = (hash * 31) + camera.aspect.GetHashCode();
+			hash = (hash * 31) + camera.orthographic.GetHashCode();
+			hash = (hash * 31) + camera.fieldOfView.GetHashCode();
+			hash = (hash * 31) + camera.orthographicSize.GetHashCode();
+
+			for (int i = 0; i < selectedAdditionalLightsCount; ++i)
+				hash = (hash * 31) + SelectedAdditionalIndices[i];
+
+			return hash;
+		}
+	}
+
+	/// <summary>
+	/// Returns whether froxel clusters should be rebuilt this frame.
+	/// </summary>
+	/// <param name="froxelHash"></param>
+	/// <param name="froxelStructuralHash"></param>
+	/// <returns></returns>
+	private static bool ShouldRebuildFroxelClusters(int froxelHash, int froxelStructuralHash)
+	{
+		if (!isMaterialStateInitialized || needsFullFroxelMetaUpload || cachedFroxelHash == int.MinValue)
+			return true;
+
+		if (froxelStructuralHash != cachedFroxelStructuralHash)
+			return true;
+
+		if (froxelHash == cachedFroxelHash)
+			return false;
+
+		return cachedFroxelBuildFrame == int.MinValue || (Time.renderedFrameCount - cachedFroxelBuildFrame) >= FroxelRebuildMinFrameInterval;
+	}
+
+	/// <summary>
+	/// Initializes immutable froxel meta offsets once.
+	/// </summary>
+	private static void InitializeFroxelMetaOffsets()
+	{
+		if (froxelMetaOffsetsInitialized)
+			return;
+
+		for (int i = 0; i < FroxelCount; ++i)
+		{
+			FroxelMetas[i].offset = i * FroxelMaxLightsPerCell;
+			FroxelMetas[i].count = 0;
+		}
+
+		froxelMetaOffsetsInitialized = true;
+		needsFullFroxelMetaUpload = true;
+	}
+
+	/// <summary>
+	/// Uploads the froxel data that changed this rebuild.
+	/// </summary>
+	private static void UploadFroxelClusterData()
+	{
+		if (needsFullFroxelMetaUpload)
+		{
+			froxelMetaBuffer.SetData(FroxelMetas);
+			needsFullFroxelMetaUpload = false;
+		}
+		else
+		{
+			UploadDirtyFroxelMetaRanges();
+		}
+
+		UploadActiveFroxelLightIndexRanges();
+	}
+
+	/// <summary>
+	/// Uploads contiguous dirty froxel-meta ranges.
+	/// </summary>
+	private static void UploadDirtyFroxelMetaRanges()
+	{
+		if (dirtyFroxelMetaCellCount <= 0)
+			return;
+
+		int rangeStart = DirtyFroxelMetaCells[0];
+		int previous = rangeStart;
+		for (int i = 1; i < dirtyFroxelMetaCellCount; ++i)
+		{
+			int current = DirtyFroxelMetaCells[i];
+			if (current != previous + 1)
+			{
+				int count = previous - rangeStart + 1;
+				froxelMetaBuffer.SetData(FroxelMetas, rangeStart, rangeStart, count);
+				rangeStart = current;
+			}
+
+			previous = current;
+		}
+
+		froxelMetaBuffer.SetData(FroxelMetas, rangeStart, rangeStart, previous - rangeStart + 1);
+	}
+
+	/// <summary>
+	/// Uploads contiguous active froxel light-index ranges.
+	/// </summary>
+	private static void UploadActiveFroxelLightIndexRanges()
+	{
+		if (activeFroxelCellCount <= 0)
+			return;
+
+		int rangeStartCell = ActiveFroxelCells[0];
+		int previousCell = rangeStartCell;
+		for (int i = 1; i < activeFroxelCellCount; ++i)
+		{
+			int currentCell = ActiveFroxelCells[i];
+			if (currentCell != previousCell + 1)
+			{
+				int startOffset = rangeStartCell * FroxelMaxLightsPerCell;
+				int count = (previousCell - rangeStartCell + 1) * FroxelMaxLightsPerCell;
+				froxelLightIndicesBuffer.SetData(FroxelLightIndices, startOffset, startOffset, count);
+				rangeStartCell = currentCell;
+			}
+
+			previousCell = currentCell;
+		}
+
+		int finalStartOffset = rangeStartCell * FroxelMaxLightsPerCell;
+		int finalCount = (previousCell - rangeStartCell + 1) * FroxelMaxLightsPerCell;
+		froxelLightIndicesBuffer.SetData(FroxelLightIndices, finalStartOffset, finalStartOffset, finalCount);
+	}
+
+	/// <summary>
+	/// Marks a froxel-meta entry as dirty once for the current rebuild.
+	/// </summary>
+	/// <param name="froxelIndex"></param>
+	/// <param name="dirtyStamp"></param>
+	private static void MarkFroxelMetaDirty(int froxelIndex, int dirtyStamp)
+	{
+		if (FroxelCellDirtyStamps[froxelIndex] == dirtyStamp)
+			return;
+
+		FroxelCellDirtyStamps[froxelIndex] = dirtyStamp;
+		DirtyFroxelMetaCells[dirtyFroxelMetaCellCount] = froxelIndex;
+		dirtyFroxelMetaCellCount++;
+	}
+
+	/// <summary>
+	/// Advances a froxel stamp and clears the stamp array if it overflows.
+	/// </summary>
+	/// <param name="stamp"></param>
+	/// <param name="stamps"></param>
+	/// <returns></returns>
+	private static int NextFroxelStamp(ref int stamp, int[] stamps)
+	{
+		if (stamp == int.MaxValue)
+		{
+			Array.Clear(stamps, 0, stamps.Length);
+			stamp = 1;
+			return stamp;
+		}
+
+		stamp++;
+		return stamp;
+	}
+
+	/// <summary>
+	/// Quantizes a scalar value for stable hash comparisons.
+	/// </summary>
+	/// <param name="value"></param>
+	/// <param name="quantization"></param>
+	/// <returns></returns>
+	private static int QuantizeFloatForHash(float value, float quantization)
+	{
+		if (quantization <= 0.0f)
+			return value.GetHashCode();
+
+		return Mathf.RoundToInt(value / quantization);
+	}
+
+	/// <summary>
+	/// Quantizes a vector value for stable hash comparisons.
+	/// </summary>
+	/// <param name="value"></param>
+	/// <param name="quantization"></param>
+	/// <returns></returns>
+	private static int QuantizeVector3ForHash(Vector3 value, float quantization)
+	{
+		unchecked
+		{
+			int hash = 17;
+			hash = (hash * 31) + QuantizeFloatForHash(value.x, quantization);
+			hash = (hash * 31) + QuantizeFloatForHash(value.y, quantization);
+			hash = (hash * 31) + QuantizeFloatForHash(value.z, quantization);
 			return hash;
 		}
 	}
@@ -1518,6 +1802,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedLightsHash = int.MinValue;
 		cachedMainCameraFrustumPlanesHash = int.MinValue;
 		cachedFroxelHash = int.MinValue;
+		cachedFroxelStructuralHash = int.MinValue;
+		cachedFroxelBuildFrame = int.MinValue;
 		cachedDistance = float.NaN;
 		cachedBaseHeight = float.NaN;
 		cachedMaximumHeight = float.NaN;
@@ -1542,6 +1828,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		froxelLightIndicesBuffer?.Release();
 		froxelLightIndicesBuffer = null;
+		needsFullFroxelMetaUpload = true;
 	}
 
 #if UNITY_6000_0_OR_NEWER

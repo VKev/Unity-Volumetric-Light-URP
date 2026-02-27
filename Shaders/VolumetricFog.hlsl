@@ -60,7 +60,7 @@ float3 ComputeOrthographicParams(float2 uv, float depth, out float3 ro, out floa
 }
 
 // Calculates the initial raymarching parameters.
-void CalculateRaymarchingParams(float2 uv, out float3 ro, out float3 rd, out float iniOffsetToNearPlane, out float offsetLength, out float3 rdPhase)
+void CalculateRaymarchingParams(float2 uv, out float3 ro, out float3 rd, out float iniOffsetToNearPlane, out float offsetLength, out float3 rdPhase, out float eyeDepthStepScale)
 {
     float depth = SampleDownsampledSceneDepth(uv);
     float3 posWS;
@@ -80,9 +80,10 @@ void CalculateRaymarchingParams(float2 uv, out float3 ro, out float3 rd, out flo
         
         // In perspective, ray direction should vary in length depending on which fragment we are at.
         float3 camFwd = normalize(-UNITY_MATRIX_V[2].xyz);
-        float cos = dot(camFwd, rd);
+        float cos = max(dot(camFwd, rd), 0.0001);
         float fragElongation = 1.0 / cos;
         iniOffsetToNearPlane = fragElongation * _ProjectionParams.y;
+        eyeDepthStepScale = cos;
     }
     else
     {
@@ -93,6 +94,7 @@ void CalculateRaymarchingParams(float2 uv, out float3 ro, out float3 rd, out flo
         // Fake the ray direction that will be used to calculate the phase, so we can still use anisotropy in orthographic mode.
         rdPhase = normalize(posWS - GetCameraPositionWS());
         iniOffsetToNearPlane = _ProjectionParams.y;
+        eyeDepthStepScale = 1.0;
     }
 }
 
@@ -186,39 +188,41 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
 }
 
 #if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
-int GetFroxelIndex(float3 currPosWS)
+bool TryGetFroxelScreenCoord(float2 uv, out int froxelX, out int froxelY)
 {
-    float3 currPosVS = mul(UNITY_MATRIX_V, float4(currPosWS, 1.0)).xyz;
-    float eyeDepth = -currPosVS.z;
+    froxelX = -1;
+    froxelY = -1;
+
+    UNITY_BRANCH
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+        return false;
+
+    int froxelWidth = (int)_FroxelGridDimensions.x;
+    int froxelHeight = (int)_FroxelGridDimensions.y;
+    froxelX = min(froxelWidth - 1, (int)(uv.x * froxelWidth));
+    froxelY = min(froxelHeight - 1, (int)(uv.y * froxelHeight));
+    return true;
+}
+
+int GetFroxelIndex(int froxelX, int froxelY, float eyeDepth)
+{
     float nearPlane = _FroxelNearFar.x;
     float farPlane = _FroxelNearFar.y;
 
     UNITY_BRANCH
-    if (eyeDepth <= nearPlane || eyeDepth >= farPlane)
-        return -1;
-
-    float4 clipPos = mul(UNITY_MATRIX_P, float4(currPosVS, 1.0));
-    float2 ndc = clipPos.xy / max(clipPos.w, 0.0001);
-    float2 uv = ndc * 0.5 + 0.5;
-
-    UNITY_BRANCH
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+    if (froxelX < 0 || froxelY < 0 || eyeDepth <= nearPlane || eyeDepth >= farPlane)
         return -1;
 
     int froxelWidth = (int)_FroxelGridDimensions.x;
-    int froxelHeight = (int)_FroxelGridDimensions.y;
     int froxelDepth = (int)_FroxelGridDimensions.z;
-
-    int froxelX = min(froxelWidth - 1, (int)(uv.x * froxelWidth));
-    int froxelY = min(froxelHeight - 1, (int)(uv.y * froxelHeight));
-    float depth01 = saturate(log(max(eyeDepth / nearPlane, 1.0)) / max(log(farPlane / nearPlane), 0.0001));
+    float depth01 = saturate(log(max(eyeDepth / nearPlane, 1.0)) * _FroxelNearFar.z);
     int froxelZ = min(froxelDepth - 1, (int)(depth01 * froxelDepth));
 
-    return froxelX + (froxelY * froxelWidth) + (froxelZ * froxelWidth * froxelHeight);
+    return froxelX + (froxelY * froxelWidth) + (froxelZ * froxelWidth * (int)_FroxelGridDimensions.y);
 }
 #endif
 
-float3 GetStepAdditionalLightsColor(float3 currPosWS, float3 rd, float density)
+float3 GetStepAdditionalLightsColor(float3 currPosWS, float3 rd, float density, int froxelX, int froxelY, float eyeDepth)
 {
 #if _ADDITIONAL_LIGHTS_CONTRIBUTION_DISABLED
     return float3(0.0, 0.0, 0.0);
@@ -226,7 +230,7 @@ float3 GetStepAdditionalLightsColor(float3 currPosWS, float3 rd, float density)
     half3 additionalLightsColor = half3(0.0, 0.0, 0.0);
 
 #if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
-    int froxelIndex = GetFroxelIndex(currPosWS);
+    int froxelIndex = GetFroxelIndex(froxelX, froxelY, eyeDepth);
     UNITY_BRANCH
     if (froxelIndex >= 0)
     {
@@ -260,8 +264,9 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
     float iniOffsetToNearPlane;
     float offsetLength;
     float3 rdPhase;
+    float eyeDepthStepScale;
 
-    CalculateRaymarchingParams(uv, ro, rd, iniOffsetToNearPlane, offsetLength, rdPhase);
+    CalculateRaymarchingParams(uv, ro, rd, iniOffsetToNearPlane, offsetLength, rdPhase, eyeDepthStepScale);
 
     offsetLength -= iniOffsetToNearPlane;
     float maxRaymarchDistance = min(offsetLength, _Distance - iniOffsetToNearPlane);
@@ -275,6 +280,19 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
 
     half phaseMainLight = GetMainLightPhase(rdPhase);
     float minusStepLengthTimesAbsortion = -stepLength * _Absortion;
+#if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
+    int froxelX;
+    int froxelY;
+    bool hasFroxelScreenCoord = TryGetFroxelScreenCoord(uv, froxelX, froxelY);
+    if (!hasFroxelScreenCoord)
+    {
+        froxelX = -1;
+        froxelY = -1;
+    }
+#else
+    int froxelX = -1;
+    int froxelY = -1;
+#endif
                 
     float3 volumetricFogColor = float3(0.0, 0.0, 0.0);
     half transmittance = 1.0;
@@ -293,6 +311,7 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         // and certain combinations of field of view, raymarching resolution and camera near plane.
         // In those edge cases, it looks so much better, specially when near plane is higher than the minimum (0.01) allowed.
         float3 currPosWS = roNearPlane + rd * dist;
+        float eyeDepth = _FroxelNearFar.x + dist * eyeDepthStepScale;
         float density = GetFogDensity(currPosWS.y);
                     
         UNITY_BRANCH
@@ -304,7 +323,7 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
 
         half3 apvColor = (half3)GetStepAdaptiveProbeVolumeEvaluation(uv, currPosWS, density);
         half3 mainLightColor = (half3)GetStepMainLightColor(currPosWS, phaseMainLight, density);
-        half3 additionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density);
+        half3 additionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density, froxelX, froxelY, eyeDepth);
         
         // TODO: Additional contributions? Reflection probes, etc...
         half3 stepColor = apvColor + mainLightColor + additionalLightsColor;
