@@ -34,6 +34,13 @@ float _Anisotropies[MAX_VISIBLE_LIGHTS + 1];
 float _Scatterings[MAX_VISIBLE_LIGHTS + 1];
 float _RadiiSq[MAX_VISIBLE_LIGHTS];
 float _AdditionalLightIndices[MAX_VISIBLE_LIGHTS];
+float4 _FroxelGridDimensions;
+float4 _FroxelNearFar;
+
+#if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
+StructuredBuffer<int2> _FroxelMetaBuffer;
+StructuredBuffer<int> _FroxelLightIndicesBuffer;
+#endif
 
 // Computes the ray origin, direction, and returns the reconstructed world position for orthographic projection.
 float3 ComputeOrthographicParams(float2 uv, float depth, out float3 ro, out float3 rd)
@@ -142,6 +149,75 @@ float3 GetStepMainLightColor(float3 currPosWS, float phaseMainLight, float densi
 }
 
 // Gets the accumulated color from additional lights at one raymarch step.
+float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, float3 rd, float density)
+{
+    float scattering = _Scatterings[compactLightIndex];
+    UNITY_BRANCH
+    if (scattering <= 0.0)
+        return float3(0.0, 0.0, 0.0);
+
+    int additionalLightIndex = (int)_AdditionalLightIndices[compactLightIndex];
+
+    Light additionalLight = GetAdditionalPerObjectLight(additionalLightIndex, currPosWS);
+    additionalLight.shadowAttenuation = VolumetricAdditionalLightRealtimeShadow(additionalLightIndex, currPosWS, additionalLight.direction);
+#if _LIGHT_COOKIES
+    additionalLight.color *= SampleAdditionalLightCookie(additionalLightIndex, currPosWS);
+#endif
+    // See universal\ShaderLibrary\RealtimeLights.hlsl - GetAdditionalPerObjectLight.
+#if USE_STRUCTURED_BUFFER_FOR_LIGHT_DATA
+    float4 additionalLightPos = _AdditionalLightsBuffer[additionalLightIndex].position;
+#else
+    float4 additionalLightPos = _AdditionalLightsPosition[additionalLightIndex];
+#endif
+    // This is useful for both spotlights and pointlights. For the latter it is specially true when the point light is inside some geometry and casts shadows.
+    // Gradually reduce additional lights scattering to zero at their origin to try to avoid flicker-aliasing.
+    float3 distToPos = additionalLightPos.xyz - currPosWS;
+    float distToPosMagnitudeSq = dot(distToPos, distToPos);
+    float newScattering = smoothstep(0.0, _RadiiSq[compactLightIndex], distToPosMagnitudeSq);
+    newScattering *= newScattering;
+    newScattering *= scattering;
+
+    // If directional lights are also considered as additional lights when more than 1 is used, ignore the previous code when it is a directional light.
+    // They store direction in additionalLightPos.xyz and have .w set to 0, while point and spotlights have it set to 1.
+    // newScattering = lerp(1.0, newScattering, additionalLightPos.w);
+
+    half phase = CornetteShanksPhaseFunction(_Anisotropies[compactLightIndex], dot(rd, additionalLight.direction));
+    return (float3)((half3)additionalLight.color * (additionalLight.shadowAttenuation * additionalLight.distanceAttenuation * phase * density * newScattering));
+}
+
+#if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
+int GetFroxelIndex(float3 currPosWS)
+{
+    float3 currPosVS = mul(UNITY_MATRIX_V, float4(currPosWS, 1.0)).xyz;
+    float eyeDepth = -currPosVS.z;
+    float nearPlane = _FroxelNearFar.x;
+    float farPlane = _FroxelNearFar.y;
+
+    UNITY_BRANCH
+    if (eyeDepth <= nearPlane || eyeDepth >= farPlane)
+        return -1;
+
+    float4 clipPos = mul(UNITY_MATRIX_P, float4(currPosVS, 1.0));
+    float2 ndc = clipPos.xy / max(clipPos.w, 0.0001);
+    float2 uv = ndc * 0.5 + 0.5;
+
+    UNITY_BRANCH
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+        return -1;
+
+    int froxelWidth = (int)_FroxelGridDimensions.x;
+    int froxelHeight = (int)_FroxelGridDimensions.y;
+    int froxelDepth = (int)_FroxelGridDimensions.z;
+
+    int froxelX = min(froxelWidth - 1, (int)(uv.x * froxelWidth));
+    int froxelY = min(froxelHeight - 1, (int)(uv.y * froxelHeight));
+    float depth01 = saturate(log(max(eyeDepth / nearPlane, 1.0)) / max(log(farPlane / nearPlane), 0.0001));
+    int froxelZ = min(froxelDepth - 1, (int)(depth01 * froxelDepth));
+
+    return froxelX + (froxelY * froxelWidth) + (froxelZ * froxelWidth * froxelHeight);
+}
+#endif
+
 float3 GetStepAdditionalLightsColor(float3 currPosWS, float3 rd, float density)
 {
 #if _ADDITIONAL_LIGHTS_CONTRIBUTION_DISABLED
@@ -149,42 +225,29 @@ float3 GetStepAdditionalLightsColor(float3 currPosWS, float3 rd, float density)
 #endif
     half3 additionalLightsColor = half3(0.0, 0.0, 0.0);
 
+#if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
+    int froxelIndex = GetFroxelIndex(currPosWS);
+    UNITY_BRANCH
+    if (froxelIndex >= 0)
+    {
+        int2 froxelMeta = _FroxelMetaBuffer[froxelIndex];
+
+        UNITY_LOOP
+        for (int i = 0; i < froxelMeta.y; ++i)
+        {
+            int compactLightIndex = _FroxelLightIndicesBuffer[froxelMeta.x + i];
+            UNITY_BRANCH
+            if (compactLightIndex >= 0)
+                additionalLightsColor += (half3)EvaluateCompactAdditionalLight(compactLightIndex, currPosWS, rd, density);
+        }
+    }
+#else
     UNITY_LOOP
     for (uint compactLightIndex = 0; compactLightIndex < _CustomAdditionalLightsCount; ++compactLightIndex)
     {
-        float scattering = _Scatterings[compactLightIndex];
-        UNITY_BRANCH
-        if (scattering > 0.0)
-        {
-            int additionalLightIndex = (int)_AdditionalLightIndices[compactLightIndex];
-
-            Light additionalLight = GetAdditionalPerObjectLight(additionalLightIndex, currPosWS);
-            additionalLight.shadowAttenuation = VolumetricAdditionalLightRealtimeShadow(additionalLightIndex, currPosWS, additionalLight.direction);
-#if _LIGHT_COOKIES
-            additionalLight.color *= SampleAdditionalLightCookie(additionalLightIndex, currPosWS);
-#endif
-            // See universal\ShaderLibrary\RealtimeLights.hlsl - GetAdditionalPerObjectLight.
-#if USE_STRUCTURED_BUFFER_FOR_LIGHT_DATA
-            float4 additionalLightPos = _AdditionalLightsBuffer[additionalLightIndex].position;
-#else
-            float4 additionalLightPos = _AdditionalLightsPosition[additionalLightIndex];
-#endif
-            // This is useful for both spotlights and pointlights. For the latter it is specially true when the point light is inside some geometry and casts shadows.
-            // Gradually reduce additional lights scattering to zero at their origin to try to avoid flicker-aliasing.
-            float3 distToPos = additionalLightPos.xyz - currPosWS;
-            float distToPosMagnitudeSq = dot(distToPos, distToPos);
-            float newScattering = smoothstep(0.0, _RadiiSq[compactLightIndex], distToPosMagnitudeSq) ;
-            newScattering *= newScattering;
-            newScattering *= scattering;
-
-            // If directional lights are also considered as additional lights when more than 1 is used, ignore the previous code when it is a directional light.
-            // They store direction in additionalLightPos.xyz and have .w set to 0, while point and spotlights have it set to 1.
-            // newScattering = lerp(1.0, newScattering, additionalLightPos.w);
-    
-            half phase = CornetteShanksPhaseFunction(_Anisotropies[compactLightIndex], dot(rd, additionalLight.direction));
-            additionalLightsColor += (half3)additionalLight.color * (additionalLight.shadowAttenuation * additionalLight.distanceAttenuation * phase * density * newScattering);
-        }
+        additionalLightsColor += (half3)EvaluateCompactAdditionalLight(compactLightIndex, currPosWS, rd, density);
     }
+#endif
 
     return (float3)additionalLightsColor;
 }

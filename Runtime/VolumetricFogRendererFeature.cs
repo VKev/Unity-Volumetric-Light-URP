@@ -19,13 +19,27 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	[SerializeField] private bool renderInSceneView;
 	[Tooltip("Render volumetric fog in overlay cameras from camera stacks.")]
 	[SerializeField] private bool renderInOverlayCameras;
-	[Tooltip("Render volumetric fog only for the camera tagged MainCamera.")]
-	[SerializeField] private bool renderOnlyMainCameraView;
 	[Tooltip("In Scene View, render fog only inside the Main Camera frustum so you can preview the game camera region.")]
 	[SerializeField] private bool renderMainCameraRegionInSceneView;
+	[Header("Debug")]
+	[Tooltip("Draw froxel cluster debug lines in Scene view. Useful to verify clustered light partitioning.")]
+	[SerializeField] private bool debugDrawFroxelClusters;
+	[Tooltip("When enabled, only draw froxel cells that have at least one clustered light.")]
+	[SerializeField] private bool debugDrawOnlyOccupiedFroxels = true;
+	[Tooltip("Maximum number of froxel cells drawn each frame to keep debug cost bounded.")]
+	[Min(1)]
+	[SerializeField] private int debugMaxFroxelsToDraw = 256;
+	[Tooltip("Draw debug cells as world-space cubes instead of frustum-shaped froxels.")]
+	[SerializeField] private bool debugDrawWorldSpaceCubes = true;
+	[Tooltip("Opacity for solid debug cube fill (world-space cube mode).")]
+	[Range(0.0f, 1.0f)]
+	[SerializeField] private float debugWorldSpaceCubeFillOpacity = 0.08f;
+	[Tooltip("Color used for froxel debug lines.")]
+	[SerializeField] private Color debugFroxelColor = new Color(0.0f, 1.0f, 1.0f, 1.0f);
 
 	private Material downsampleDepthMaterial;
 	private Material volumetricFogMaterial;
+	private Camera lastKnownMainCamera;
 
 	private VolumetricFogRenderPass volumetricFogRenderPass;
 
@@ -38,9 +52,7 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// </summary>
 	public override void Create()
 	{
-		ValidateResourcesForVolumetricFogRenderPass(true);
-
-		volumetricFogRenderPass = new VolumetricFogRenderPass(downsampleDepthMaterial, volumetricFogMaterial, VolumetricFogRenderPass.DefaultRenderPassEvent);
+		EnsureVolumetricFogRenderPassInitialized(true);
 	}
 
 	/// <summary>
@@ -50,14 +62,25 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// <param name="renderingData"></param>
 	public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
 	{
+		if (!EnsureVolumetricFogRenderPassInitialized(false))
+			return;
+
+		if (renderingData.cameraData.cameraType == CameraType.SceneView)
+			volumetricFogRenderPass.InvalidateMaterialStateCache();
+
+		Camera scenePreviewMainCamera = ResolveMainCamera();
+		if (scenePreviewMainCamera != null)
+			lastKnownMainCamera = scenePreviewMainCamera;
+
 		VolumetricFogVolumeComponent fogVolume = VolumeManager.instance.stack.GetComponent<VolumetricFogVolumeComponent>();
-		bool shouldPreviewMainCameraRegionInSceneView = ShouldPreviewMainCameraRegionInSceneView(renderingData.cameraData);
+		bool shouldPreviewMainCameraRegionInSceneView = ShouldPreviewMainCameraRegionInSceneView(renderingData.cameraData, scenePreviewMainCamera);
 		bool isPostProcessEnabled = renderingData.postProcessingEnabled && renderingData.cameraData.postProcessEnabled;
 		bool shouldAddVolumetricFogRenderPass = isPostProcessEnabled && ShouldAddVolumetricFogRenderPass(renderingData.cameraData, shouldPreviewMainCameraRegionInSceneView, fogVolume);
 		
 		if (shouldAddVolumetricFogRenderPass)
 		{
-			volumetricFogRenderPass.SetupSceneViewMainCameraMask(shouldPreviewMainCameraRegionInSceneView, Camera.main);
+			volumetricFogRenderPass.SetupSceneViewMainCameraMask(shouldPreviewMainCameraRegionInSceneView, scenePreviewMainCamera);
+			volumetricFogRenderPass.SetupFroxelDebugDrawing(debugDrawFroxelClusters, debugDrawOnlyOccupiedFroxels, debugMaxFroxelsToDraw, debugDrawWorldSpaceCubes, debugWorldSpaceCubeFillOpacity, debugFroxelColor);
 			volumetricFogRenderPass.renderPassEvent = GetRenderPassEvent(fogVolume);
 			volumetricFogRenderPass.ConfigureInput(ScriptableRenderPassInput.Depth);
 			renderer.EnqueuePass(volumetricFogRenderPass);
@@ -73,6 +96,7 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 		base.Dispose(disposing);
 
 		volumetricFogRenderPass?.Dispose();
+		lastKnownMainCamera = null;
 
 		CoreUtils.Destroy(downsampleDepthMaterial);
 		CoreUtils.Destroy(volumetricFogMaterial);
@@ -81,6 +105,56 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	#endregion
 
 	#region Methods
+
+	/// <summary>
+	/// Resolves the main camera with fallbacks for editor refresh moments where Camera.main can be temporarily null.
+	/// </summary>
+	/// <returns></returns>
+	private Camera ResolveMainCamera()
+	{
+		Camera mainCamera = Camera.main;
+		if (mainCamera != null)
+			return mainCamera;
+
+		if (lastKnownMainCamera != null)
+			return lastKnownMainCamera;
+
+		Camera[] allCameras = Resources.FindObjectsOfTypeAll<Camera>();
+		for (int i = 0; i < allCameras.Length; ++i)
+		{
+			Camera camera = allCameras[i];
+			if (camera == null || !camera.CompareTag("MainCamera"))
+				continue;
+
+			if (!camera.gameObject.scene.IsValid())
+				continue;
+
+			return camera;
+		}
+
+		return null;
+	}
+
+	/// <summary>
+	/// Ensures pass resources are valid and the render pass is constructed with the current materials.
+	/// </summary>
+	/// <param name="forceRefresh"></param>
+	/// <returns></returns>
+	private bool EnsureVolumetricFogRenderPassInitialized(bool forceRefresh)
+	{
+		bool resourcesOk = ValidateResourcesForVolumetricFogRenderPass(false);
+		bool shouldRecreatePass = forceRefresh || !resourcesOk || volumetricFogRenderPass == null;
+		if (shouldRecreatePass)
+		{
+			if (!ValidateResourcesForVolumetricFogRenderPass(true))
+				return false;
+
+			volumetricFogRenderPass?.Dispose();
+			volumetricFogRenderPass = new VolumetricFogRenderPass(downsampleDepthMaterial, volumetricFogMaterial, VolumetricFogRenderPass.DefaultRenderPassEvent);
+		}
+
+		return volumetricFogRenderPass != null;
+	}
 
 	/// <summary>
 	/// Validates the resources used by the volumetric fog render pass.
@@ -118,16 +192,13 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	private bool ShouldAddVolumetricFogRenderPass(CameraData cameraData, bool shouldPreviewMainCameraRegionInSceneView, VolumetricFogVolumeComponent fogVolume)
 	{
 		CameraType cameraType = cameraData.cameraType;
-		Camera camera = cameraData.camera;
 		bool isOverlayCamera = cameraData.renderType == CameraRenderType.Overlay;
 		bool isSceneViewCamera = cameraType == CameraType.SceneView;
-		bool isMainCamera = camera != null && camera.CompareTag("MainCamera");
 
 		bool isVolumeOk = fogVolume != null && fogVolume.IsActive();
 		bool isCameraOk = cameraType != CameraType.Preview && cameraType != CameraType.Reflection;
 		isCameraOk &= renderInSceneView || !isSceneViewCamera || shouldPreviewMainCameraRegionInSceneView;
 		isCameraOk &= renderInOverlayCameras || !isOverlayCamera;
-		isCameraOk &= !renderOnlyMainCameraView || isMainCamera || shouldPreviewMainCameraRegionInSceneView;
 		bool areResourcesOk = ValidateResourcesForVolumetricFogRenderPass(false);
 
 		return isActive && isVolumeOk && isCameraOk && areResourcesOk;
@@ -137,13 +208,14 @@ public sealed class VolumetricFogRendererFeature : ScriptableRendererFeature
 	/// Gets whether scene view should preview volumetric fog only in the main camera frustum.
 	/// </summary>
 	/// <param name="cameraData"></param>
+	/// <param name="mainCamera"></param>
 	/// <returns></returns>
-	private bool ShouldPreviewMainCameraRegionInSceneView(CameraData cameraData)
+	private bool ShouldPreviewMainCameraRegionInSceneView(CameraData cameraData, Camera mainCamera)
 	{
 		if (!renderMainCameraRegionInSceneView || cameraData.cameraType != CameraType.SceneView)
 			return false;
 
-		return Camera.main != null;
+		return mainCamera != null;
 	}
 
 	/// <summary>
