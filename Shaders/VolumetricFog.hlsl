@@ -29,6 +29,7 @@ float _APVContributionWeight;
 float _TransmittanceThreshold;
 float3 _Tint;
 int _MaxSteps;
+int _LightEvaluationStride;
 
 float _Anisotropies[MAX_VISIBLE_LIGHTS + 1];
 float _Scatterings[MAX_VISIBLE_LIGHTS + 1];
@@ -118,23 +119,23 @@ float GetFogDensity(float posWSy)
     return _Density * t;
 }
 
-// Gets the GI evaluation from the adaptive probe volume at one raymarch step.
-float3 GetStepAdaptiveProbeVolumeEvaluation(float2 uv, float3 posWS, float density)
+// Gets the GI lighting from the adaptive probe volume at one raymarch step.
+float3 GetStepAdaptiveProbeVolumeLighting(float2 uv, float3 posWS)
 {
     half3 apvDiffuseGI = half3(0.0, 0.0, 0.0);
     
 #if UNITY_VERSION >= 202310 && _APV_CONTRIBUTION_ENABLED
     #if defined(PROBE_VOLUMES_L1) || defined(PROBE_VOLUMES_L2)
         EvaluateAdaptiveProbeVolume(posWS, uv * _ScreenSize.xy, apvDiffuseGI);
-        apvDiffuseGI = apvDiffuseGI * (half)_APVContributionWeight * (half)density;
+        apvDiffuseGI = apvDiffuseGI * (half)_APVContributionWeight;
     #endif
 #endif
  
     return (float3)apvDiffuseGI;
 }
 
-// Gets the main light color at one raymarch step.
-float3 GetStepMainLightColor(float3 currPosWS, float phaseMainLight, float density)
+// Gets the main light lighting at one raymarch step.
+float3 GetStepMainLightLighting(float3 currPosWS, float phaseMainLight)
 {
 #if _MAIN_LIGHT_CONTRIBUTION_DISABLED
     return float3(0.0, 0.0, 0.0);
@@ -147,11 +148,11 @@ float3 GetStepMainLightColor(float3 currPosWS, float phaseMainLight, float densi
 #endif
     half3 tint = (half3)_Tint;
     half scattering = (half)_Scatterings[_CustomAdditionalLightsCount];
-    return (float3)((half3)mainLight.color * tint * (mainLight.shadowAttenuation * (half)phaseMainLight * (half)density * scattering));
+    return (float3)((half3)mainLight.color * tint * (mainLight.shadowAttenuation * (half)phaseMainLight * scattering));
 }
 
-// Gets the accumulated color from additional lights at one raymarch step.
-float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, float3 rd, float density)
+// Gets the accumulated lighting from one compact additional light at one raymarch step.
+float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, float3 rd)
 {
     float scattering = _Scatterings[compactLightIndex];
     UNITY_BRANCH
@@ -184,7 +185,7 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
     // newScattering = lerp(1.0, newScattering, additionalLightPos.w);
 
     half phase = CornetteShanksPhaseFunction(_Anisotropies[compactLightIndex], dot(rd, additionalLight.direction));
-    return (float3)((half3)additionalLight.color * (additionalLight.shadowAttenuation * additionalLight.distanceAttenuation * phase * density * newScattering));
+    return (float3)((half3)additionalLight.color * (additionalLight.shadowAttenuation * additionalLight.distanceAttenuation * phase * newScattering));
 }
 
 #if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
@@ -222,7 +223,7 @@ int GetFroxelIndex(int froxelX, int froxelY, float eyeDepth)
 }
 #endif
 
-float3 GetStepAdditionalLightsColor(float3 currPosWS, float3 rd, float density, int froxelX, int froxelY, float eyeDepth)
+float3 GetStepAdditionalLightsLighting(float3 currPosWS, float3 rd, int froxelX, int froxelY, float eyeDepth)
 {
 #if _ADDITIONAL_LIGHTS_CONTRIBUTION_DISABLED
     return float3(0.0, 0.0, 0.0);
@@ -242,14 +243,14 @@ float3 GetStepAdditionalLightsColor(float3 currPosWS, float3 rd, float density, 
             int compactLightIndex = _FroxelLightIndicesBuffer[froxelMeta.x + i];
             UNITY_BRANCH
             if (compactLightIndex >= 0)
-                additionalLightsColor += (half3)EvaluateCompactAdditionalLight(compactLightIndex, currPosWS, rd, density);
+                additionalLightsColor += (half3)EvaluateCompactAdditionalLight(compactLightIndex, currPosWS, rd);
         }
     }
 #else
     UNITY_LOOP
     for (uint compactLightIndex = 0; compactLightIndex < _CustomAdditionalLightsCount; ++compactLightIndex)
     {
-        additionalLightsColor += (half3)EvaluateCompactAdditionalLight(compactLightIndex, currPosWS, rd, density);
+        additionalLightsColor += (half3)EvaluateCompactAdditionalLight(compactLightIndex, currPosWS, rd);
     }
 #endif
 
@@ -280,6 +281,7 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
 
     half phaseMainLight = GetMainLightPhase(rdPhase);
     float minusStepLengthTimesAbsortion = -stepLength * _Absortion;
+    int lightEvaluationStride = max(_LightEvaluationStride, 1);
 #if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
     int froxelX;
     int froxelY;
@@ -296,6 +298,8 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
                 
     float3 volumetricFogColor = float3(0.0, 0.0, 0.0);
     half transmittance = 1.0;
+    half3 cachedStepLighting = half3(0.0, 0.0, 0.0);
+    int lightEvaluationCountdown = 0;
 
     UNITY_LOOP
     for (int i = 0; i < _MaxSteps; ++i)
@@ -321,12 +325,22 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         half stepAttenuation = exp(minusStepLengthTimesAbsortion * density);
         transmittance *= stepAttenuation;
 
-        half3 apvColor = (half3)GetStepAdaptiveProbeVolumeEvaluation(uv, currPosWS, density);
-        half3 mainLightColor = (half3)GetStepMainLightColor(currPosWS, phaseMainLight, density);
-        half3 additionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density, froxelX, froxelY, eyeDepth);
+        UNITY_BRANCH
+        if (lightEvaluationCountdown <= 0)
+        {
+            half3 apvLighting = (half3)GetStepAdaptiveProbeVolumeLighting(uv, currPosWS);
+            half3 mainLightLighting = (half3)GetStepMainLightLighting(currPosWS, phaseMainLight);
+            half3 additionalLightsLighting = (half3)GetStepAdditionalLightsLighting(currPosWS, rd, froxelX, froxelY, eyeDepth);
+            cachedStepLighting = apvLighting + mainLightLighting + additionalLightsLighting;
+            lightEvaluationCountdown = lightEvaluationStride - 1;
+        }
+        else
+        {
+            lightEvaluationCountdown--;
+        }
         
         // TODO: Additional contributions? Reflection probes, etc...
-        half3 stepColor = apvColor + mainLightColor + additionalLightsColor;
+        half3 stepColor = cachedStepLighting * (half)density;
         volumetricFogColor += ((float3)stepColor * (transmittance * stepLength));
 
         UNITY_BRANCH

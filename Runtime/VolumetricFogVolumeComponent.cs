@@ -65,6 +65,8 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	public VolumetricFogDownsampleModeParameter downsampleMode = new VolumetricFogDownsampleModeParameter(VolumetricFogDownsampleMode.Half);
 	[Tooltip("Raymarching steps. Greater values will increase the fog quality at the expense of performance.")]
 	public ClampedIntParameter maxSteps = new ClampedIntParameter(128, 8, 256);
+	[Tooltip("Evaluates volumetric lighting every N raymarch steps while still integrating extinction every step. Higher values are faster but may soften or lag fine lighting detail.")]
+	public ClampedIntParameter lightEvaluationStride = new ClampedIntParameter(2, 1, 4);
 	[Tooltip("Maximum additional lights considered during fog raymarching. Lower values improve performance in scenes with many lights.")]
 	public ClampedIntParameter maxAdditionalLights = new ClampedIntParameter(MaxVisibleAdditionalLights, 0, MaxVisibleAdditionalLights);
 	[Tooltip("The number of times that the fog texture will be blurred. Higher values lead to softer volumetric god rays at the cost of some performance.")]

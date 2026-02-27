@@ -104,6 +104,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 #endif
 	private static readonly int TintId = Shader.PropertyToID("_Tint");
 	private static readonly int MaxStepsId = Shader.PropertyToID("_MaxSteps");
+	private static readonly int LightEvaluationStrideId = Shader.PropertyToID("_LightEvaluationStride");
 	private static readonly int TransmittanceThresholdId = Shader.PropertyToID("_TransmittanceThreshold");
 	private static readonly int FroxelGridDimensionsId = Shader.PropertyToID("_FroxelGridDimensions");
 	private static readonly int FroxelNearFarId = Shader.PropertyToID("_FroxelNearFar");
@@ -214,6 +215,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 #endif
 	private static Color cachedTint;
 	private static int cachedMaxSteps;
+	private static int cachedLightEvaluationStride;
 	private static float cachedTransmittanceThreshold;
 
 	#endregion
@@ -323,10 +325,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		RenderTextureFormat originalColorFormat = cameraTargetDescriptor.colorFormat;
 		Vector2Int originalResolution = new Vector2Int(cameraTargetDescriptor.width, cameraTargetDescriptor.height);
 		int downsampleFactor = GetDownsampleFactor(fogVolume);
+		GraphicsFormat downsampledDepthFormat = GetDownsampledDepthGraphicsFormat();
 
 		cameraTargetDescriptor.width = Mathf.Max(1, cameraTargetDescriptor.width / downsampleFactor);
 		cameraTargetDescriptor.height = Mathf.Max(1, cameraTargetDescriptor.height / downsampleFactor);
-		cameraTargetDescriptor.graphicsFormat = GraphicsFormat.R32_SFloat;
+		cameraTargetDescriptor.graphicsFormat = downsampledDepthFormat;
 		ReAllocateIfNeeded(ref downsampledCameraDepthRTHandle, cameraTargetDescriptor, wrapMode: TextureWrapMode.Clamp, name: DownsampledCameraDepthRTName);
 
 		cameraTargetDescriptor.colorFormat = RenderTextureFormat.ARGBHalf;
@@ -583,6 +586,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 #endif
 		SetColorIfChanged(volumetricFogMaterial, TintId, fogVolume.tint.value, ref cachedTint);
 		SetIntIfChanged(volumetricFogMaterial, MaxStepsId, fogVolume.maxSteps.value, ref cachedMaxSteps);
+		SetIntIfChanged(volumetricFogMaterial, LightEvaluationStrideId, fogVolume.lightEvaluationStride.value, ref cachedLightEvaluationStride);
 		SetFloatIfChanged(volumetricFogMaterial, TransmittanceThresholdId, fogVolume.transmittanceThreshold.value, ref cachedTransmittanceThreshold);
 
 		if (enableMainLightContribution || effectiveAdditionalLightsCount > 0)
@@ -1815,6 +1819,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 #endif
 		cachedTint = new Color(float.NaN, float.NaN, float.NaN, float.NaN);
 		cachedMaxSteps = int.MinValue;
+		cachedLightEvaluationStride = int.MinValue;
 		cachedTransmittanceThreshold = float.NaN;
 	}
 
@@ -1850,10 +1855,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		RenderTextureFormat originalColorFormat = cameraTargetDescriptor.colorFormat;
 		Vector2Int originalResolution = new Vector2Int(cameraTargetDescriptor.width, cameraTargetDescriptor.height);
 		int downsampleFactor = GetDownsampleFactor(fogVolume);
+		GraphicsFormat downsampledDepthFormat = GetDownsampledDepthGraphicsFormat();
 
 		cameraTargetDescriptor.width = Mathf.Max(1, cameraTargetDescriptor.width / downsampleFactor);
 		cameraTargetDescriptor.height = Mathf.Max(1, cameraTargetDescriptor.height / downsampleFactor);
-		cameraTargetDescriptor.graphicsFormat = GraphicsFormat.R32_SFloat;
+		cameraTargetDescriptor.graphicsFormat = downsampledDepthFormat;
 		downsampledCameraDepthTarget = UniversalRenderer.CreateRenderGraphTexture(renderGraph, cameraTargetDescriptor, DownsampledCameraDepthRTName, false);
 
 		cameraTargetDescriptor.colorFormat = RenderTextureFormat.ARGBHalf;
@@ -1922,6 +1928,15 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		VolumetricFogDownsampleMode downsampleMode = fogVolume.downsampleMode.value;
 		return downsampleMode == VolumetricFogDownsampleMode.Quarter ? (int)VolumetricFogDownsampleMode.Quarter : (int)VolumetricFogDownsampleMode.Half;
+	}
+
+	/// <summary>
+	/// Returns the graphics format used for the downsampled linear depth target.
+	/// </summary>
+	/// <returns></returns>
+	private static GraphicsFormat GetDownsampledDepthGraphicsFormat()
+	{
+		return SystemInfo.IsFormatSupported(GraphicsFormat.R16_SFloat, GraphicsFormatUsage.Render) ? GraphicsFormat.R16_SFloat : GraphicsFormat.R32_SFloat;
 	}
 
 	/// <summary>
