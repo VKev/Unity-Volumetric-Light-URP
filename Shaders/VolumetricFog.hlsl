@@ -42,6 +42,23 @@ StructuredBuffer<int2> _FroxelMetaBuffer;
 StructuredBuffer<int> _FroxelLightIndicesBuffer;
 #endif
 
+struct MainLightContext
+{
+    half3 color;
+    half phase;
+};
+
+struct FroxelRaymarchContext
+{
+    int froxelXYBase;
+    int froxelPlaneStride;
+    float nearPlane;
+    float farPlane;
+    float invLogDepthRange;
+    float viewOriginZ;
+    float viewDirZ;
+};
+
 // Computes the ray origin, direction, and returns the reconstructed world position for orthographic projection.
 float3 ComputeOrthographicParams(float2 uv, float depth, out float3 ro, out float3 rd)
 {
@@ -96,14 +113,20 @@ void CalculateRaymarchingParams(float2 uv, out float3 ro, out float3 rd, out flo
     }
 }
 
-// Gets the main light phase function.
-float GetMainLightPhase(float3 rd)
+// Caches main-light values that stay constant through the raymarch.
+MainLightContext CreateMainLightContext(float3 rdPhase)
 {
-#if _MAIN_LIGHT_CONTRIBUTION_DISABLED
-    return 0.0;
-#else
-    return CornetteShanksPhaseFunction(_Anisotropies[_CustomAdditionalLightsCount], dot(rd, GetMainLight().direction));
+    MainLightContext context;
+    context.color = half3(0.0, 0.0, 0.0);
+    context.phase = half(0.0);
+
+#if !_MAIN_LIGHT_CONTRIBUTION_DISABLED
+    Light mainLight = GetMainLight();
+    context.color = (half3)mainLight.color * (half3)_Tint * (half)_Scatterings[_CustomAdditionalLightsCount];
+    context.phase = (half)CornetteShanksPhaseFunction(_Anisotropies[_CustomAdditionalLightsCount], dot(rdPhase, mainLight.direction));
 #endif
+
+    return context;
 }
 
 // Gets the fog density at the given world height.
@@ -132,20 +155,19 @@ float3 GetStepAdaptiveProbeVolumeEvaluation(float2 uv, float3 posWS, float densi
 }
 
 // Gets the main light color at one raymarch step.
-float3 GetStepMainLightColor(float3 currPosWS, float phaseMainLight, float density)
+float3 GetStepMainLightColor(float3 currPosWS, MainLightContext mainLightContext, float density)
 {
 #if _MAIN_LIGHT_CONTRIBUTION_DISABLED
     return float3(0.0, 0.0, 0.0);
 #endif
-    Light mainLight = GetMainLight();
     float4 shadowCoord = TransformWorldToShadowCoord(currPosWS);
-    mainLight.shadowAttenuation = VolumetricMainLightRealtimeShadow(shadowCoord);
+    half shadowAttenuation = VolumetricMainLightRealtimeShadow(shadowCoord);
 #if _LIGHT_COOKIES
-    mainLight.color *= SampleMainLightCookie(currPosWS);
+    half3 mainLightColor = mainLightContext.color * (half3)SampleMainLightCookie(currPosWS);
+#else
+    half3 mainLightColor = mainLightContext.color;
 #endif
-    half3 tint = (half3)_Tint;
-    half scattering = (half)_Scatterings[_CustomAdditionalLightsCount];
-    return (float3)((half3)mainLight.color * tint * (mainLight.shadowAttenuation * (half)phaseMainLight * (half)density * scattering));
+    return (float3)(mainLightColor * (shadowAttenuation * mainLightContext.phase * (half)density));
 }
 
 // Gets the accumulated color from additional lights at one raymarch step.
@@ -186,39 +208,56 @@ float3 EvaluateCompactAdditionalLight(int compactLightIndex, float3 currPosWS, f
 }
 
 #if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
-int GetFroxelIndex(float3 currPosWS)
+FroxelRaymarchContext CreateFroxelRaymarchContext(float2 uv, float3 roNearPlaneWS, float3 rd)
 {
-    float3 currPosVS = mul(UNITY_MATRIX_V, float4(currPosWS, 1.0)).xyz;
-    float eyeDepth = -currPosVS.z;
-    float nearPlane = _FroxelNearFar.x;
-    float farPlane = _FroxelNearFar.y;
-
-    UNITY_BRANCH
-    if (eyeDepth <= nearPlane || eyeDepth >= farPlane)
-        return -1;
-
-    float4 clipPos = mul(UNITY_MATRIX_P, float4(currPosVS, 1.0));
-    float2 ndc = clipPos.xy / max(clipPos.w, 0.0001);
-    float2 uv = ndc * 0.5 + 0.5;
-
-    UNITY_BRANCH
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
-        return -1;
+    FroxelRaymarchContext context;
+    context.froxelXYBase = -1;
+    context.froxelPlaneStride = 0;
+    context.nearPlane = 0.0;
+    context.farPlane = 0.0;
+    context.invLogDepthRange = 0.0;
+    context.viewOriginZ = 0.0;
+    context.viewDirZ = 0.0;
 
     int froxelWidth = (int)_FroxelGridDimensions.x;
     int froxelHeight = (int)_FroxelGridDimensions.y;
+    float clampedU = saturate(uv.x);
+    float clampedV = saturate(uv.y);
+
+    context.froxelXYBase = min(froxelWidth - 1, (int)(clampedU * froxelWidth));
+    context.froxelXYBase += min(froxelHeight - 1, (int)(clampedV * froxelHeight)) * froxelWidth;
+    context.froxelPlaneStride = froxelWidth * froxelHeight;
+    context.nearPlane = max(_FroxelNearFar.x, 0.0001);
+    context.farPlane = max(_FroxelNearFar.y, context.nearPlane + 0.0001);
+    context.invLogDepthRange = rcp(max(log(context.farPlane / context.nearPlane), 0.0001));
+
+    float3 roNearPlaneVS = mul(UNITY_MATRIX_V, float4(roNearPlaneWS, 1.0)).xyz;
+    float3 rdVS = mul((float3x3)UNITY_MATRIX_V, rd);
+    context.viewOriginZ = roNearPlaneVS.z;
+    context.viewDirZ = rdVS.z;
+
+    return context;
+}
+
+int GetFroxelIndex(FroxelRaymarchContext context, float rayDistance)
+{
+    UNITY_BRANCH
+    if (context.froxelXYBase < 0)
+        return -1;
+
+    float eyeDepth = -(context.viewOriginZ + context.viewDirZ * rayDistance);
+    UNITY_BRANCH
+    if (eyeDepth <= context.nearPlane || eyeDepth >= context.farPlane)
+        return -1;
+
     int froxelDepth = (int)_FroxelGridDimensions.z;
-
-    int froxelX = min(froxelWidth - 1, (int)(uv.x * froxelWidth));
-    int froxelY = min(froxelHeight - 1, (int)(uv.y * froxelHeight));
-    float depth01 = saturate(log(max(eyeDepth / nearPlane, 1.0)) / max(log(farPlane / nearPlane), 0.0001));
+    float depth01 = saturate(log(max(eyeDepth / context.nearPlane, 1.0)) * context.invLogDepthRange);
     int froxelZ = min(froxelDepth - 1, (int)(depth01 * froxelDepth));
-
-    return froxelX + (froxelY * froxelWidth) + (froxelZ * froxelWidth * froxelHeight);
+    return context.froxelXYBase + (froxelZ * context.froxelPlaneStride);
 }
 #endif
 
-float3 GetStepAdditionalLightsColor(float3 currPosWS, float3 rd, float density)
+float3 GetStepAdditionalLightsColor(float3 currPosWS, float3 rd, float density, int2 froxelMeta)
 {
 #if _ADDITIONAL_LIGHTS_CONTRIBUTION_DISABLED
     return float3(0.0, 0.0, 0.0);
@@ -226,20 +265,11 @@ float3 GetStepAdditionalLightsColor(float3 currPosWS, float3 rd, float density)
     half3 additionalLightsColor = half3(0.0, 0.0, 0.0);
 
 #if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
-    int froxelIndex = GetFroxelIndex(currPosWS);
-    UNITY_BRANCH
-    if (froxelIndex >= 0)
+    UNITY_LOOP
+    for (int i = 0; i < froxelMeta.y; ++i)
     {
-        int2 froxelMeta = _FroxelMetaBuffer[froxelIndex];
-
-        UNITY_LOOP
-        for (int i = 0; i < froxelMeta.y; ++i)
-        {
-            int compactLightIndex = _FroxelLightIndicesBuffer[froxelMeta.x + i];
-            UNITY_BRANCH
-            if (compactLightIndex >= 0)
-                additionalLightsColor += (half3)EvaluateCompactAdditionalLight(compactLightIndex, currPosWS, rd, density);
-        }
+        int compactLightIndex = _FroxelLightIndicesBuffer[froxelMeta.x + i];
+        additionalLightsColor += (half3)EvaluateCompactAdditionalLight(compactLightIndex, currPosWS, rd, density);
     }
 #else
     UNITY_LOOP
@@ -273,11 +303,24 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
     float stepLength = maxRaymarchDistance / (float)_MaxSteps;
     float jitter = stepLength * InterleavedGradientNoise(positionCS, _FrameCount);
 
-    half phaseMainLight = GetMainLightPhase(rdPhase);
+    MainLightContext mainLightContext = CreateMainLightContext(rdPhase);
     float minusStepLengthTimesAbsortion = -stepLength * _Absortion;
+    FroxelRaymarchContext froxelRaymarchContext;
+    froxelRaymarchContext.froxelXYBase = -1;
+    froxelRaymarchContext.froxelPlaneStride = 0;
+    froxelRaymarchContext.nearPlane = 0.0;
+    froxelRaymarchContext.farPlane = 0.0;
+    froxelRaymarchContext.invLogDepthRange = 0.0;
+    froxelRaymarchContext.viewOriginZ = 0.0;
+    froxelRaymarchContext.viewDirZ = 0.0;
+#if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
+    froxelRaymarchContext = CreateFroxelRaymarchContext(uv, roNearPlane, rd);
+#endif
                 
     float3 volumetricFogColor = float3(0.0, 0.0, 0.0);
     half transmittance = 1.0;
+    int currentFroxelIndex = -1;
+    int2 currentFroxelMeta = int2(0, 0);
 
     UNITY_LOOP
     for (int i = 0; i < _MaxSteps; ++i)
@@ -302,9 +345,23 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         half stepAttenuation = exp(minusStepLengthTimesAbsortion * density);
         transmittance *= stepAttenuation;
 
+#if defined(_FROXEL_CLUSTERED_ADDITIONAL_LIGHTS) && (SHADER_TARGET >= 45)
+        int froxelIndex = GetFroxelIndex(froxelRaymarchContext, dist);
+        UNITY_BRANCH
+        if (froxelIndex != currentFroxelIndex)
+        {
+            currentFroxelIndex = froxelIndex;
+            currentFroxelMeta = int2(0, 0);
+
+            UNITY_BRANCH
+            if (froxelIndex >= 0)
+                currentFroxelMeta = _FroxelMetaBuffer[froxelIndex];
+        }
+#endif
+
         half3 apvColor = (half3)GetStepAdaptiveProbeVolumeEvaluation(uv, currPosWS, density);
-        half3 mainLightColor = (half3)GetStepMainLightColor(currPosWS, phaseMainLight, density);
-        half3 additionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density);
+        half3 mainLightColor = (half3)GetStepMainLightColor(currPosWS, mainLightContext, density);
+        half3 additionalLightsColor = (half3)GetStepAdditionalLightsColor(currPosWS, rd, density, currentFroxelMeta);
         
         // TODO: Additional contributions? Reflection probes, etc...
         half3 stepColor = apvColor + mainLightColor + additionalLightsColor;

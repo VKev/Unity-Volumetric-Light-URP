@@ -691,11 +691,12 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (light.type != LightType.Point && light.type != LightType.Spot)
 			return false;
 
-		if (!light.TryGetComponent(out VolumetricAdditionalLight volumetricLight) || !volumetricLight.enabled || !volumetricLight.gameObject.activeInHierarchy)
+		if (!VolumetricAdditionalLight.TryResolve(light, out VolumetricAdditionalLight volumetricLight) || !volumetricLight.enabled || !volumetricLight.gameObject.activeInHierarchy)
 			return false;
 
 		scattering = volumetricLight.Scattering;
-		if (scattering <= MinAdditionalLightScattering || light.intensity <= MinAdditionalLightIntensity)
+		float lightBrightness = Mathf.Max(visibleLight.finalColor.maxColorComponent, light.intensity);
+		if (scattering <= MinAdditionalLightScattering || lightBrightness <= MinAdditionalLightIntensity)
 			return false;
 
 		float range = Mathf.Max(light.range, 0.01f);
@@ -714,7 +715,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		radiusSq = volumetricLight.Radius * volumetricLight.Radius;
 
 		float distanceWeight = (range * range) / Mathf.Max(distanceSq, 1.0f);
-		score = scattering * light.intensity * distanceWeight;
+		score = scattering * lightBrightness * distanceWeight;
 		if (light.type == LightType.Spot)
 		{
 			float spotAngleCos = Mathf.Cos(0.5f * Mathf.Deg2Rad * light.spotAngle);
@@ -742,28 +743,23 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (maxAdditionalLights <= 0)
 			return;
 
-		int selectedIndex = -1;
+		if (selectedCount >= maxAdditionalLights && score <= SelectedScores[selectedCount - 1])
+			return;
+
+		int selectedIndex = selectedCount;
 		if (selectedCount < maxAdditionalLights)
 		{
-			selectedIndex = selectedCount++;
+			selectedCount++;
 		}
 		else
 		{
-			float minScore = SelectedScores[0];
-			int minScoreIndex = 0;
-			for (int i = 1; i < selectedCount; ++i)
-			{
-				if (SelectedScores[i] < minScore)
-				{
-					minScore = SelectedScores[i];
-					minScoreIndex = i;
-				}
-			}
+			selectedIndex = selectedCount - 1;
+		}
 
-			if (score <= minScore)
-				return;
-
-			selectedIndex = minScoreIndex;
+		while (selectedIndex > 0 && score > SelectedScores[selectedIndex - 1])
+		{
+			CopySelectedAdditionalLight(selectedIndex - 1, selectedIndex);
+			selectedIndex--;
 		}
 
 		SelectedAdditionalIndices[selectedIndex] = additionalLightIndex;
@@ -773,6 +769,22 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		SelectedScores[selectedIndex] = score;
 		SelectedLightPositions[selectedIndex] = lightPosition;
 		SelectedLightRanges[selectedIndex] = lightRange;
+	}
+
+	/// <summary>
+	/// Copies one selected additional light entry to another slot.
+	/// </summary>
+	/// <param name="sourceIndex"></param>
+	/// <param name="destinationIndex"></param>
+	private static void CopySelectedAdditionalLight(int sourceIndex, int destinationIndex)
+	{
+		SelectedAdditionalIndices[destinationIndex] = SelectedAdditionalIndices[sourceIndex];
+		SelectedAnisotropies[destinationIndex] = SelectedAnisotropies[sourceIndex];
+		SelectedScatterings[destinationIndex] = SelectedScatterings[sourceIndex];
+		SelectedRadiiSq[destinationIndex] = SelectedRadiiSq[sourceIndex];
+		SelectedScores[destinationIndex] = SelectedScores[sourceIndex];
+		SelectedLightPositions[destinationIndex] = SelectedLightPositions[sourceIndex];
+		SelectedLightRanges[destinationIndex] = SelectedLightRanges[sourceIndex];
 	}
 
 	/// <summary>
@@ -817,7 +829,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static bool TryConfigureFroxelClusteredLights(Material material, Camera camera, int selectedAdditionalLightsCount, bool debugRestrictToMainCameraFrustum, Vector4[] debugMainCameraFrustumPlanes, out int froxelHash)
 	{
 		froxelHash = 0;
-		if (camera == null || selectedAdditionalLightsCount <= 0 || !SystemInfo.supportsComputeShaders)
+		if (camera == null || selectedAdditionalLightsCount <= 0 || SystemInfo.graphicsShaderLevel < 45 || !SystemInfo.supportsComputeShaders)
 			return false;
 
 		froxelHash = ComputeFroxelInputHash(camera, selectedAdditionalLightsCount);
@@ -869,8 +881,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static void BuildFroxelClusters(Camera camera, int selectedAdditionalLightsCount)
 	{
 		Array.Clear(FroxelCellLightCounts, 0, FroxelCellLightCounts.Length);
-		for (int i = 0; i < FroxelLightIndices.Length; ++i)
-			FroxelLightIndices[i] = -1;
 
 		float near = Mathf.Max(camera.nearClipPlane, 0.01f);
 		float far = Mathf.Max(camera.farClipPlane, near + 0.01f);
@@ -1417,6 +1427,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			hash = (hash * 31) + camera.transform.rotation.GetHashCode();
 			hash = (hash * 31) + camera.nearClipPlane.GetHashCode();
 			hash = (hash * 31) + camera.farClipPlane.GetHashCode();
+			hash = (hash * 31) + camera.projectionMatrix.GetHashCode();
 
 			for (int i = 0; i < selectedAdditionalLightsCount; ++i)
 			{
