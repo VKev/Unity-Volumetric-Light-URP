@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -29,6 +30,25 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		public Color color;
 	}
 
+	private struct AdditionalLightProxy
+	{
+		public Vector3 position;
+		public float range;
+		public Vector3 boundsCenter;
+		public float boundsRadius;
+		public float anisotropy;
+		public float scattering;
+		public float radiusSq;
+		public float brightness;
+		public float spotScoreMultiplier;
+	}
+
+	private struct CachedAdditionalLightProxy
+	{
+		public int stateHash;
+		public AdditionalLightProxy proxy;
+	}
+
 #if UNITY_6000_0_OR_NEWER
 
 	/// <summary>
@@ -38,6 +58,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	{
 		DownsampleDepth,
 		VolumetricFogRender,
+		VolumetricFogRawCopy,
 		VolumetricFogBlur,
 		VolumetricFogUpsampleComposition
 	}
@@ -58,6 +79,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		public TextureHandle downsampledCameraDepthTarget;
 		public TextureHandle volumetricFogRenderTarget;
+		public TextureHandle rawVolumetricFogRenderTarget;
 		public UniversalLightData lightData;
 		public VolumetricFogVolumeComponent fogVolume;
 		public Vector3 cameraPosition;
@@ -82,11 +104,13 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 	private const string DownsampledCameraDepthRTName = "_DownsampledCameraDepth";
 	private const string VolumetricFogRenderRTName = "_VolumetricFog";
+	private const string RawVolumetricFogRenderRTName = "_RawVolumetricFog";
 	private const string VolumetricFogBlurRTName = "_VolumetricFogBlur";
 	private const string VolumetricFogUpsampleCompositionRTName = "_VolumetricFogUpsampleComposition";
 
 	private static readonly int DownsampledCameraDepthTextureId = Shader.PropertyToID("_DownsampledCameraDepthTexture");
 	private static readonly int VolumetricFogTextureId = Shader.PropertyToID("_VolumetricFogTexture");
+	public static readonly int RawVolumetricFogTextureId = Shader.PropertyToID("_RawVolumetricFogTexture");
 	private static readonly int SceneViewMainCameraFrustumMaskEnabledId = Shader.PropertyToID("_SceneViewMainCameraFrustumMaskEnabled");
 	private static readonly int MainCameraFrustumPlanesId = Shader.PropertyToID("_MainCameraFrustumPlanes");
 	private static readonly int DebugColorId = Shader.PropertyToID("_Color");
@@ -123,6 +147,17 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private const int FroxelCount = FroxelGridWidth * FroxelGridHeight * FroxelGridDepth;
 	private const float MinAdditionalLightScattering = 0.0001f;
 	private const float MinAdditionalLightIntensity = 0.001f;
+	private const float MinLightSelectionPositionQuantization = 0.25f;
+	private const float MaxLightSelectionPositionQuantization = 0.5f;
+	private const float MinFroxelPositionQuantization = 0.05f;
+	private const float MaxFroxelPositionQuantization = 0.5f;
+	private const float MinFroxelRotationQuantization = 0.1f;
+	private const float MaxFroxelRotationQuantization = 0.5f;
+	private const float FroxelFieldOfViewQuantization = 0.25f;
+	private const float FroxelNearClipQuantization = 0.01f;
+	private const float FroxelFarClipQuantization = 0.25f;
+	private const float FroxelAspectQuantization = 0.01f;
+	private const float FroxelOrthographicSizeQuantization = 0.05f;
 	private static int LightsParametersLength = MaxVisibleAdditionalLights + 1;
 
 	private static readonly float[] Anisotropies = new float[LightsParametersLength];
@@ -135,11 +170,14 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly float[] SelectedScatterings = new float[MaxVisibleAdditionalLights];
 	private static readonly float[] SelectedRadiiSq = new float[MaxVisibleAdditionalLights];
 	private static readonly float[] SelectedScores = new float[MaxVisibleAdditionalLights];
-	private static readonly Vector3[] SelectedLightPositions = new Vector3[MaxVisibleAdditionalLights];
-	private static readonly float[] SelectedLightRanges = new float[MaxVisibleAdditionalLights];
+	private static readonly Vector3[] SelectedLightBoundsCenters = new Vector3[MaxVisibleAdditionalLights];
+	private static readonly float[] SelectedLightBoundsRadii = new float[MaxVisibleAdditionalLights];
+	private static readonly AdditionalLightProxy[] VisibleAdditionalLightProxies = new AdditionalLightProxy[MaxVisibleAdditionalLights];
+	private static readonly int[] VisibleAdditionalLightIndices = new int[MaxVisibleAdditionalLights];
 	private static readonly FroxelMeta[] FroxelMetas = new FroxelMeta[FroxelCount];
 	private static readonly int[] FroxelLightIndices = new int[FroxelCount * FroxelMaxLightsPerCell];
 	private static readonly int[] FroxelCellLightCounts = new int[FroxelCount];
+	private static readonly Dictionary<int, CachedAdditionalLightProxy> AdditionalLightProxyCache = new Dictionary<int, CachedAdditionalLightProxy>(MaxVisibleAdditionalLights);
 
 	private static ComputeBuffer froxelMetaBuffer;
 	private static ComputeBuffer froxelLightIndicesBuffer;
@@ -155,6 +193,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 	private RTHandle downsampledCameraDepthRTHandle;
 	private RTHandle volumetricFogRenderRTHandle;
+	private RTHandle rawVolumetricFogRenderRTHandle;
 	private RTHandle volumetricFogBlurRTHandle;
 	private RTHandle volumetricFogUpsampleCompositionRTHandle;
 
@@ -182,6 +221,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static bool cachedAPVContributionEnabled;
 #endif
 	private static int cachedAdditionalLightsCount;
+	private static int cachedLightSelectionHash = int.MinValue;
+	private static int cachedSelectedAdditionalLightsCount;
 	private static int cachedLightsHash;
 	private static int cachedMainCameraFrustumPlanesHash;
 	private static int cachedFroxelHash;
@@ -313,6 +354,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		cameraTargetDescriptor.colorFormat = RenderTextureFormat.ARGBHalf;
 		ReAllocateIfNeeded(ref volumetricFogRenderRTHandle, cameraTargetDescriptor, wrapMode: TextureWrapMode.Clamp, name: VolumetricFogRenderRTName);
+		ReAllocateIfNeeded(ref rawVolumetricFogRenderRTHandle, cameraTargetDescriptor, wrapMode: TextureWrapMode.Clamp, name: RawVolumetricFogRenderRTName);
 		ReAllocateIfNeeded(ref volumetricFogBlurRTHandle, cameraTargetDescriptor, wrapMode: TextureWrapMode.Clamp, name: VolumetricFogBlurRTName);
 
 		cameraTargetDescriptor.width = originalResolution.x;
@@ -346,6 +388,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		{
 			UpdateVolumetricFogMaterialParameters(volumetricFogMaterial, fogVolume, renderingData.cameraData.camera, cameraPosition, renderingData.lightData.mainLightIndex, renderingData.lightData.additionalLightsCount, renderingData.lightData.visibleLights, sceneViewMainCameraFrustumMaskEnabled, mainCameraFrustumPlanes);
 			Blitter.BlitCameraTexture(cmd, volumetricFogRenderRTHandle, volumetricFogRenderRTHandle, volumetricFogMaterial, volumetricFogRenderPassIndex);
+			Blitter.BlitCameraTexture(cmd, volumetricFogRenderRTHandle, rawVolumetricFogRenderRTHandle);
+			cmd.SetGlobalTexture(RawVolumetricFogTextureId, rawVolumetricFogRenderRTHandle);
 
 			int blurIterations = fogVolume != null ? fogVolume.blurIterations.value : 0;
 
@@ -387,7 +431,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		Vector3 cameraPosition = sceneCamera != null ? sceneCamera.transform.position : Vector3.zero;
 		ApplySceneViewMainCameraMaskParameters(volumetricFogMaterial);
 
-		CreateRenderGraphTextures(renderGraph, cameraData, fogVolume, out TextureHandle downsampledCameraDepthTarget, out TextureHandle volumetricFogRenderTarget, out TextureHandle volumetricFogBlurRenderTarget, out TextureHandle volumetricFogUpsampleCompositionTarget);
+		CreateRenderGraphTextures(renderGraph, cameraData, fogVolume, out TextureHandle downsampledCameraDepthTarget, out TextureHandle volumetricFogRenderTarget, out TextureHandle rawVolumetricFogRenderTarget, out TextureHandle volumetricFogBlurRenderTarget, out TextureHandle volumetricFogUpsampleCompositionTarget);
 
 		using (IRasterRenderGraphBuilder builder = renderGraph.AddRasterRenderPass("Downsample Depth Pass", out PassData passData, downsampleDepthProfilingSampler))
 		{
@@ -423,6 +467,18 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 				builder.UseTexture(resourceData.mainShadowsTexture);
 			if (resourceData.additionalShadowsTexture.IsValid())
 				builder.UseTexture(resourceData.additionalShadowsTexture);
+			builder.SetRenderFunc((PassData data, RasterGraphContext context) => ExecutePass(data, context));
+		}
+
+		using (IRasterRenderGraphBuilder builder = renderGraph.AddRasterRenderPass("Volumetric Fog Raw Copy Pass", out PassData passData))
+		{
+			passData.stage = PassStage.VolumetricFogRawCopy;
+			passData.source = volumetricFogRenderTarget;
+			passData.target = rawVolumetricFogRenderTarget;
+
+			builder.SetRenderAttachment(rawVolumetricFogRenderTarget, 0, AccessFlags.WriteAll);
+			builder.UseTexture(volumetricFogRenderTarget);
+			builder.SetGlobalTextureAfterPass(rawVolumetricFogRenderTarget, RawVolumetricFogTextureId);
 			builder.SetRenderFunc((PassData data, RasterGraphContext context) => ExecutePass(data, context));
 		}
 
@@ -626,7 +682,10 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			bool groundEnabled = fogVolume.enableGround.overrideState && fogVolume.enableGround.value;
 			float fogMinHeight = groundEnabled ? fogVolume.groundHeight.value : float.NegativeInfinity;
 			float fogMaxHeight = fogVolume.maximumHeight.value;
+			Vector3 selectionCameraPosition = QuantizeVector3(cameraPosition, GetLightSelectionPositionQuantizationStep(fogDistance));
 			int additionalLightSlotIndex = 0;
+			int visibleAdditionalLightsCount = 0;
+			int lightSelectionHash = ComputeBaseLightSelectionHash(maxAdditionalLights, mainLightIndex, additionalLightsCount, fogDistance, fogMinHeight, fogMaxHeight, selectionCameraPosition);
 
 			for (int i = 0; i <= lastIndex && additionalLightSlotIndex < additionalLightsCount; ++i)
 			{
@@ -634,21 +693,39 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 					continue;
 
 				int additionalLightIndex = additionalLightSlotIndex++;
-				VisibleLight visibleLight = visibleLights[i];
-
-				if (!TryGetAdditionalLightCandidate(visibleLight, cameraPosition, fogDistance, fogMinHeight, fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score, out Vector3 lightPosition, out float lightRange))
+				if (!TryGetAdditionalLightProxy(visibleLights[i], out AdditionalLightProxy lightProxy, out int lightStateHash))
+				{
+					lightSelectionHash = CombineHash(lightSelectionHash, additionalLightIndex);
+					lightSelectionHash = CombineHash(lightSelectionHash, lightStateHash);
 					continue;
+				}
 
-				TryInsertSelectedAdditionalLight(additionalLightIndex, anisotropy, scattering, radiusSq, score, lightPosition, lightRange, maxAdditionalLights, ref effectiveAdditionalLightsCount);
+				lightSelectionHash = CombineHash(lightSelectionHash, additionalLightIndex);
+				lightSelectionHash = CombineHash(lightSelectionHash, lightStateHash);
+				VisibleAdditionalLightIndices[visibleAdditionalLightsCount] = additionalLightIndex;
+				VisibleAdditionalLightProxies[visibleAdditionalLightsCount] = lightProxy;
+				visibleAdditionalLightsCount++;
 			}
-		}
 
-		for (int i = 0; i < effectiveAdditionalLightsCount; ++i)
-		{
-			AdditionalLightIndices[i] = SelectedAdditionalIndices[i];
-			Anisotropies[i] = SelectedAnisotropies[i];
-			Scatterings[i] = SelectedScatterings[i];
-			RadiiSq[i] = SelectedRadiiSq[i];
+			if (lightSelectionHash != cachedLightSelectionHash)
+			{
+				for (int i = 0; i < visibleAdditionalLightsCount; ++i)
+				{
+					AdditionalLightProxy lightProxy = VisibleAdditionalLightProxies[i];
+					if (!TryScoreAdditionalLightCandidate(lightProxy, selectionCameraPosition, fogDistance, fogMinHeight, fogMaxHeight, out float score))
+						continue;
+
+					TryInsertSelectedAdditionalLight(VisibleAdditionalLightIndices[i], lightProxy.anisotropy, lightProxy.scattering, lightProxy.radiusSq, score, lightProxy.boundsCenter, lightProxy.boundsRadius, maxAdditionalLights, ref effectiveAdditionalLightsCount);
+				}
+
+				CopySelectedAdditionalLightsToShaderArrays(effectiveAdditionalLightsCount);
+				cachedSelectedAdditionalLightsCount = effectiveAdditionalLightsCount;
+				cachedLightSelectionHash = lightSelectionHash;
+			}
+			else
+			{
+				effectiveAdditionalLightsCount = cachedSelectedAdditionalLightsCount;
+			}
 		}
 
 		if (enableMainLightContribution)
@@ -662,70 +739,195 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	}
 
 	/// <summary>
-	/// Returns whether a visible light is a valid additional light candidate for fog.
+	/// Returns a cached proxy for one visible additional light.
 	/// </summary>
 	/// <param name="visibleLight"></param>
+	/// <param name="lightProxy"></param>
+	/// <param name="lightStateHash"></param>
+	/// <returns></returns>
+	private static bool TryGetAdditionalLightProxy(in VisibleLight visibleLight, out AdditionalLightProxy lightProxy, out int lightStateHash)
+	{
+		lightProxy = default;
+		lightStateHash = 17;
+
+		Light light = visibleLight.light;
+		if (light == null)
+			return false;
+
+		lightStateHash = CombineHash(lightStateHash, light.GetInstanceID());
+		lightStateHash = CombineHash(lightStateHash, (int)light.type);
+		lightStateHash = CombineHash(lightStateHash, light.enabled ? 1 : 0);
+		lightStateHash = CombineHash(lightStateHash, light.gameObject.activeInHierarchy ? 1 : 0);
+		if (!light.enabled || !light.gameObject.activeInHierarchy)
+			return false;
+
+		if (light.type != LightType.Point && light.type != LightType.Spot)
+			return false;
+
+		if (!VolumetricAdditionalLight.TryResolve(light, out VolumetricAdditionalLight volumetricLight) || volumetricLight == null)
+			return false;
+
+		lightStateHash = CombineHash(lightStateHash, volumetricLight.enabled ? 1 : 0);
+		lightStateHash = CombineHash(lightStateHash, volumetricLight.gameObject.activeInHierarchy ? 1 : 0);
+		if (!volumetricLight.enabled || !volumetricLight.gameObject.activeInHierarchy)
+			return false;
+
+		float lightBrightness = Mathf.Max(visibleLight.finalColor.maxColorComponent, light.intensity);
+		float range = Mathf.Max(light.range, 0.01f);
+		Vector3 lightWorldPosition = light.transform.position;
+		float anisotropy = volumetricLight.Anisotropy;
+		float scattering = volumetricLight.Scattering;
+		float radiusSq = volumetricLight.Radius * volumetricLight.Radius;
+		float spotScoreMultiplier = 1.0f;
+		if (light.type == LightType.Spot)
+		{
+			float spotAngleCos = Mathf.Cos(0.5f * Mathf.Deg2Rad * light.spotAngle);
+			spotScoreMultiplier = Mathf.Max(0.25f, spotAngleCos);
+		}
+
+		lightStateHash = CombineHash(lightStateHash, lightWorldPosition.GetHashCode());
+		lightStateHash = CombineHash(lightStateHash, light.transform.rotation.GetHashCode());
+		lightStateHash = CombineHash(lightStateHash, range.GetHashCode());
+		lightStateHash = CombineHash(lightStateHash, light.spotAngle.GetHashCode());
+		lightStateHash = CombineHash(lightStateHash, lightBrightness.GetHashCode());
+		lightStateHash = CombineHash(lightStateHash, anisotropy.GetHashCode());
+		lightStateHash = CombineHash(lightStateHash, scattering.GetHashCode());
+		lightStateHash = CombineHash(lightStateHash, radiusSq.GetHashCode());
+
+		if (AdditionalLightProxyCache.TryGetValue(light.GetInstanceID(), out CachedAdditionalLightProxy cachedLightProxy) && cachedLightProxy.stateHash == lightStateHash)
+		{
+			lightProxy = cachedLightProxy.proxy;
+			return lightProxy.scattering > MinAdditionalLightScattering && lightProxy.brightness > MinAdditionalLightIntensity;
+		}
+
+		Vector3 boundsCenter = lightWorldPosition;
+		float boundsRadius = range;
+		if (light.type == LightType.Spot)
+			GetSpotLightBounds(light, lightWorldPosition, range, out boundsCenter, out boundsRadius);
+
+		lightProxy.position = lightWorldPosition;
+		lightProxy.range = range;
+		lightProxy.boundsCenter = boundsCenter;
+		lightProxy.boundsRadius = boundsRadius;
+		lightProxy.anisotropy = anisotropy;
+		lightProxy.scattering = scattering;
+		lightProxy.radiusSq = radiusSq;
+		lightProxy.brightness = lightBrightness;
+		lightProxy.spotScoreMultiplier = spotScoreMultiplier;
+
+		AdditionalLightProxyCache[light.GetInstanceID()] = new CachedAdditionalLightProxy()
+		{
+			stateHash = lightStateHash,
+			proxy = lightProxy
+		};
+
+		return lightProxy.scattering > MinAdditionalLightScattering && lightProxy.brightness > MinAdditionalLightIntensity;
+	}
+
+	/// <summary>
+	/// Returns whether a cached additional-light proxy is relevant for the current fog and camera.
+	/// </summary>
+	/// <param name="lightProxy"></param>
 	/// <param name="cameraPosition"></param>
 	/// <param name="fogDistance"></param>
 	/// <param name="fogMinHeight"></param>
 	/// <param name="fogMaxHeight"></param>
-	/// <param name="anisotropy"></param>
-	/// <param name="scattering"></param>
-	/// <param name="radiusSq"></param>
 	/// <param name="score"></param>
 	/// <returns></returns>
-	private static bool TryGetAdditionalLightCandidate(in VisibleLight visibleLight, in Vector3 cameraPosition, float fogDistance, float fogMinHeight, float fogMaxHeight, out float anisotropy, out float scattering, out float radiusSq, out float score, out Vector3 lightPosition, out float lightRange)
+	private static bool TryScoreAdditionalLightCandidate(in AdditionalLightProxy lightProxy, in Vector3 cameraPosition, float fogDistance, float fogMinHeight, float fogMaxHeight, out float score)
 	{
-		anisotropy = 0.0f;
-		scattering = 0.0f;
-		radiusSq = 0.0f;
 		score = 0.0f;
-		lightPosition = Vector3.zero;
-		lightRange = 0.0f;
-
-		Light light = visibleLight.light;
-		if (light == null || !light.enabled || !light.gameObject.activeInHierarchy)
+		if (lightProxy.scattering <= MinAdditionalLightScattering || lightProxy.brightness <= MinAdditionalLightIntensity)
 			return false;
 
-		// Volumetric additional lights are only expected to be point and spot lights.
-		if (light.type != LightType.Point && light.type != LightType.Spot)
-			return false;
-
-		if (!VolumetricAdditionalLight.TryResolve(light, out VolumetricAdditionalLight volumetricLight) || !volumetricLight.enabled || !volumetricLight.gameObject.activeInHierarchy)
-			return false;
-
-		scattering = volumetricLight.Scattering;
-		float lightBrightness = Mathf.Max(visibleLight.finalColor.maxColorComponent, light.intensity);
-		if (scattering <= MinAdditionalLightScattering || lightBrightness <= MinAdditionalLightIntensity)
-			return false;
-
-		float range = Mathf.Max(light.range, 0.01f);
-		Vector3 lightWorldPosition = light.transform.position;
-		float maxDistance = fogDistance + range;
-		float distanceSq = (lightWorldPosition - cameraPosition).sqrMagnitude;
+		float maxDistance = fogDistance + lightProxy.boundsRadius;
+		float distanceSq = (lightProxy.boundsCenter - cameraPosition).sqrMagnitude;
 		if (distanceSq > maxDistance * maxDistance)
 			return false;
 
-		float lightMinY = lightWorldPosition.y - range;
-		float lightMaxY = lightWorldPosition.y + range;
+		float lightMinY = lightProxy.boundsCenter.y - lightProxy.boundsRadius;
+		float lightMaxY = lightProxy.boundsCenter.y + lightProxy.boundsRadius;
 		if (lightMaxY < fogMinHeight || lightMinY > fogMaxHeight)
 			return false;
 
-		anisotropy = volumetricLight.Anisotropy;
-		radiusSq = volumetricLight.Radius * volumetricLight.Radius;
-
-		float distanceWeight = (range * range) / Mathf.Max(distanceSq, 1.0f);
-		score = scattering * lightBrightness * distanceWeight;
-		if (light.type == LightType.Spot)
-		{
-			float spotAngleCos = Mathf.Cos(0.5f * Mathf.Deg2Rad * light.spotAngle);
-			score *= Mathf.Max(0.25f, spotAngleCos);
-		}
-
-		lightPosition = lightWorldPosition;
-		lightRange = range;
-
+		float distanceWeight = (lightProxy.range * lightProxy.range) / Mathf.Max(distanceSq, 1.0f);
+		score = lightProxy.scattering * lightProxy.brightness * distanceWeight * lightProxy.spotScoreMultiplier;
 		return score > 0.0f;
+	}
+
+	/// <summary>
+	/// Copies the selected additional lights to the shader upload arrays.
+	/// </summary>
+	/// <param name="selectedAdditionalLightsCount"></param>
+	private static void CopySelectedAdditionalLightsToShaderArrays(int selectedAdditionalLightsCount)
+	{
+		for (int i = 0; i < selectedAdditionalLightsCount; ++i)
+		{
+			AdditionalLightIndices[i] = SelectedAdditionalIndices[i];
+			Anisotropies[i] = SelectedAnisotropies[i];
+			Scatterings[i] = SelectedScatterings[i];
+			RadiiSq[i] = SelectedRadiiSq[i];
+		}
+	}
+
+	/// <summary>
+	/// Computes a proxy sphere that bounds one spotlight cone.
+	/// </summary>
+	/// <param name="light"></param>
+	/// <param name="lightPosition"></param>
+	/// <param name="lightRange"></param>
+	/// <param name="boundsCenter"></param>
+	/// <param name="boundsRadius"></param>
+	private static void GetSpotLightBounds(Light light, Vector3 lightPosition, float lightRange, out Vector3 boundsCenter, out float boundsRadius)
+	{
+		boundsCenter = lightPosition;
+		boundsRadius = lightRange;
+
+		if (light == null)
+			return;
+
+		float clampedHalfSpotAngle = Mathf.Min(0.5f * light.spotAngle * Mathf.Deg2Rad, 1.55334306f);
+		float baseRadius = lightRange * Mathf.Tan(clampedHalfSpotAngle);
+		float centerDistance = baseRadius <= lightRange ? ((lightRange * lightRange) + (baseRadius * baseRadius)) / (2.0f * lightRange) : lightRange;
+		boundsCenter = lightPosition + light.transform.forward * centerDistance;
+		boundsRadius = baseRadius <= lightRange ? centerDistance : baseRadius;
+	}
+
+	/// <summary>
+	/// Computes the base hash for cached additional-light selection.
+	/// </summary>
+	/// <param name="maxAdditionalLights"></param>
+	/// <param name="mainLightIndex"></param>
+	/// <param name="additionalLightsCount"></param>
+	/// <param name="fogDistance"></param>
+	/// <param name="fogMinHeight"></param>
+	/// <param name="fogMaxHeight"></param>
+	/// <param name="cameraPosition"></param>
+	/// <returns></returns>
+	private static int ComputeBaseLightSelectionHash(int maxAdditionalLights, int mainLightIndex, int additionalLightsCount, float fogDistance, float fogMinHeight, float fogMaxHeight, Vector3 cameraPosition)
+	{
+		unchecked
+		{
+			int hash = 17;
+			hash = CombineHash(hash, maxAdditionalLights);
+			hash = CombineHash(hash, mainLightIndex);
+			hash = CombineHash(hash, additionalLightsCount);
+			hash = CombineHash(hash, fogDistance.GetHashCode());
+			hash = CombineHash(hash, fogMinHeight.GetHashCode());
+			hash = CombineHash(hash, fogMaxHeight.GetHashCode());
+			hash = CombineHash(hash, cameraPosition.GetHashCode());
+			return hash;
+		}
+	}
+
+	/// <summary>
+	/// Returns the quantization step used by the cached light-selection camera position.
+	/// </summary>
+	/// <param name="fogDistance"></param>
+	/// <returns></returns>
+	private static float GetLightSelectionPositionQuantizationStep(float fogDistance)
+	{
+		return Mathf.Clamp(fogDistance / 256.0f, MinLightSelectionPositionQuantization, MaxLightSelectionPositionQuantization);
 	}
 
 	/// <summary>
@@ -736,9 +938,11 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="scattering"></param>
 	/// <param name="radiusSq"></param>
 	/// <param name="score"></param>
+	/// <param name="boundsCenter"></param>
+	/// <param name="boundsRadius"></param>
 	/// <param name="maxAdditionalLights"></param>
 	/// <param name="selectedCount"></param>
-	private static void TryInsertSelectedAdditionalLight(int additionalLightIndex, float anisotropy, float scattering, float radiusSq, float score, Vector3 lightPosition, float lightRange, int maxAdditionalLights, ref int selectedCount)
+	private static void TryInsertSelectedAdditionalLight(int additionalLightIndex, float anisotropy, float scattering, float radiusSq, float score, Vector3 boundsCenter, float boundsRadius, int maxAdditionalLights, ref int selectedCount)
 	{
 		if (maxAdditionalLights <= 0)
 			return;
@@ -767,8 +971,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		SelectedScatterings[selectedIndex] = scattering;
 		SelectedRadiiSq[selectedIndex] = radiusSq;
 		SelectedScores[selectedIndex] = score;
-		SelectedLightPositions[selectedIndex] = lightPosition;
-		SelectedLightRanges[selectedIndex] = lightRange;
+		SelectedLightBoundsCenters[selectedIndex] = boundsCenter;
+		SelectedLightBoundsRadii[selectedIndex] = boundsRadius;
 	}
 
 	/// <summary>
@@ -783,8 +987,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		SelectedScatterings[destinationIndex] = SelectedScatterings[sourceIndex];
 		SelectedRadiiSq[destinationIndex] = SelectedRadiiSq[sourceIndex];
 		SelectedScores[destinationIndex] = SelectedScores[sourceIndex];
-		SelectedLightPositions[destinationIndex] = SelectedLightPositions[sourceIndex];
-		SelectedLightRanges[destinationIndex] = SelectedLightRanges[sourceIndex];
+		SelectedLightBoundsCenters[destinationIndex] = SelectedLightBoundsCenters[sourceIndex];
+		SelectedLightBoundsRadii[destinationIndex] = SelectedLightBoundsRadii[sourceIndex];
 	}
 
 	/// <summary>
@@ -838,7 +1042,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		if (froxelMetaBuffer == null || froxelLightIndicesBuffer == null)
 			return false;
 
-		if (!isMaterialStateInitialized || froxelHash != cachedFroxelHash)
+		if (froxelHash != cachedFroxelHash)
 		{
 			BuildFroxelClusters(camera, selectedAdditionalLightsCount);
 			froxelMetaBuffer.SetData(FroxelMetas);
@@ -895,8 +1099,8 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		for (int compactLightIndex = 0; compactLightIndex < selectedAdditionalLightsCount; ++compactLightIndex)
 		{
-			Vector3 lightPosition = SelectedLightPositions[compactLightIndex];
-			float lightRange = Mathf.Max(SelectedLightRanges[compactLightIndex], 0.01f);
+			Vector3 lightPosition = SelectedLightBoundsCenters[compactLightIndex];
+			float lightRange = Mathf.Max(SelectedLightBoundsRadii[compactLightIndex], 0.01f);
 
 			Vector3 lightPositionView = viewMatrix.MultiplyPoint(lightPosition);
 			float lightEyeDepth = -lightPositionView.z;
@@ -1422,21 +1626,169 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		unchecked
 		{
 			int hash = 17;
-			hash = (hash * 31) + selectedAdditionalLightsCount;
-			hash = (hash * 31) + camera.transform.position.GetHashCode();
-			hash = (hash * 31) + camera.transform.rotation.GetHashCode();
-			hash = (hash * 31) + camera.nearClipPlane.GetHashCode();
-			hash = (hash * 31) + camera.farClipPlane.GetHashCode();
-			hash = (hash * 31) + camera.projectionMatrix.GetHashCode();
+			GetQuantizedFroxelCameraState(camera, out Vector3 quantizedPosition, out Vector3 quantizedRotationEuler, out float quantizedFieldOfView, out float quantizedNearClip, out float quantizedFarClip, out float quantizedAspect, out float quantizedOrthographicSize);
+			hash = CombineHash(hash, selectedAdditionalLightsCount);
+			hash = CombineHash(hash, quantizedPosition.GetHashCode());
+			hash = CombineHash(hash, quantizedRotationEuler.GetHashCode());
+			hash = CombineHash(hash, quantizedFieldOfView.GetHashCode());
+			hash = CombineHash(hash, quantizedNearClip.GetHashCode());
+			hash = CombineHash(hash, quantizedFarClip.GetHashCode());
+			hash = CombineHash(hash, quantizedAspect.GetHashCode());
+			hash = CombineHash(hash, quantizedOrthographicSize.GetHashCode());
+			hash = CombineHash(hash, camera.orthographic ? 1 : 0);
 
 			for (int i = 0; i < selectedAdditionalLightsCount; ++i)
 			{
-				hash = (hash * 31) + SelectedAdditionalIndices[i];
-				hash = (hash * 31) + SelectedLightPositions[i].GetHashCode();
-				hash = (hash * 31) + SelectedLightRanges[i].GetHashCode();
+				hash = CombineHash(hash, SelectedAdditionalIndices[i]);
+				hash = CombineHash(hash, SelectedLightBoundsCenters[i].GetHashCode());
+				hash = CombineHash(hash, SelectedLightBoundsRadii[i].GetHashCode());
 			}
 
 			return hash;
+		}
+	}
+
+	/// <summary>
+	/// Returns the quantized camera state used to validate froxel clustering.
+	/// </summary>
+	/// <param name="camera"></param>
+	/// <param name="quantizedPosition"></param>
+	/// <param name="quantizedRotationEuler"></param>
+	/// <param name="quantizedFieldOfView"></param>
+	/// <param name="quantizedNearClip"></param>
+	/// <param name="quantizedFarClip"></param>
+	/// <param name="quantizedAspect"></param>
+	/// <param name="quantizedOrthographicSize"></param>
+	private static void GetQuantizedFroxelCameraState(Camera camera, out Vector3 quantizedPosition, out Vector3 quantizedRotationEuler, out float quantizedFieldOfView, out float quantizedNearClip, out float quantizedFarClip, out float quantizedAspect, out float quantizedOrthographicSize)
+	{
+		float positionStep = GetFroxelPositionQuantizationStep(camera);
+		float rotationStep = GetFroxelRotationQuantizationStep(camera);
+
+		quantizedPosition = QuantizeVector3(camera.transform.position, positionStep);
+		quantizedRotationEuler = QuantizeEulerAngles(camera.transform.eulerAngles, rotationStep);
+		quantizedFieldOfView = QuantizeFloat(camera.fieldOfView, FroxelFieldOfViewQuantization);
+		quantizedNearClip = QuantizeFloat(camera.nearClipPlane, FroxelNearClipQuantization);
+		quantizedFarClip = QuantizeFloat(camera.farClipPlane, FroxelFarClipQuantization);
+		quantizedAspect = QuantizeFloat(camera.aspect, FroxelAspectQuantization);
+		quantizedOrthographicSize = QuantizeFloat(camera.orthographicSize, FroxelOrthographicSizeQuantization);
+	}
+
+	/// <summary>
+	/// Returns the world-space quantization step used by the froxel cache.
+	/// </summary>
+	/// <param name="camera"></param>
+	/// <returns></returns>
+	private static float GetFroxelPositionQuantizationStep(Camera camera)
+	{
+		if (camera == null)
+			return MinFroxelPositionQuantization;
+
+		float frustumHeight;
+		float frustumWidth;
+		if (camera.orthographic)
+		{
+			frustumHeight = camera.orthographicSize * 2.0f;
+			frustumWidth = frustumHeight * Mathf.Max(camera.aspect, 0.0001f);
+		}
+		else
+		{
+			float near = Mathf.Max(camera.nearClipPlane, 0.01f);
+			float verticalFovRadians = Mathf.Max(camera.fieldOfView * Mathf.Deg2Rad, 0.0001f);
+			frustumHeight = 2.0f * near * Mathf.Tan(0.5f * verticalFovRadians);
+			frustumWidth = frustumHeight * Mathf.Max(camera.aspect, 0.0001f);
+		}
+
+		float cellWidth = frustumWidth / FroxelGridWidth;
+		float cellHeight = frustumHeight / FroxelGridHeight;
+		float step = 0.5f * Mathf.Min(cellWidth, cellHeight);
+		return Mathf.Clamp(step, MinFroxelPositionQuantization, MaxFroxelPositionQuantization);
+	}
+
+	/// <summary>
+	/// Returns the angular quantization step used by the froxel cache.
+	/// </summary>
+	/// <param name="camera"></param>
+	/// <returns></returns>
+	private static float GetFroxelRotationQuantizationStep(Camera camera)
+	{
+		if (camera == null)
+			return MinFroxelRotationQuantization;
+
+		if (camera.orthographic)
+			return MaxFroxelRotationQuantization;
+
+		float verticalFov = Mathf.Max(camera.fieldOfView, 0.1f);
+		float horizontalFov = 2.0f * Mathf.Rad2Deg * Mathf.Atan(Mathf.Tan(0.5f * verticalFov * Mathf.Deg2Rad) * Mathf.Max(camera.aspect, 0.0001f));
+		float verticalCellAngle = verticalFov / FroxelGridHeight;
+		float horizontalCellAngle = horizontalFov / FroxelGridWidth;
+		float step = 0.5f * Mathf.Min(verticalCellAngle, horizontalCellAngle);
+		return Mathf.Clamp(step, MinFroxelRotationQuantization, MaxFroxelRotationQuantization);
+	}
+
+	/// <summary>
+	/// Quantizes a vector with a uniform step.
+	/// </summary>
+	/// <param name="value"></param>
+	/// <param name="step"></param>
+	/// <returns></returns>
+	private static Vector3 QuantizeVector3(Vector3 value, float step)
+	{
+		return new Vector3(
+			QuantizeFloat(value.x, step),
+			QuantizeFloat(value.y, step),
+			QuantizeFloat(value.z, step));
+	}
+
+	/// <summary>
+	/// Quantizes Euler angles while preserving wraparound.
+	/// </summary>
+	/// <param name="eulerAngles"></param>
+	/// <param name="step"></param>
+	/// <returns></returns>
+	private static Vector3 QuantizeEulerAngles(Vector3 eulerAngles, float step)
+	{
+		return new Vector3(
+			QuantizeAngleDegrees(eulerAngles.x, step),
+			QuantizeAngleDegrees(eulerAngles.y, step),
+			QuantizeAngleDegrees(eulerAngles.z, step));
+	}
+
+	/// <summary>
+	/// Quantizes one angle in degrees while preserving wraparound.
+	/// </summary>
+	/// <param name="degrees"></param>
+	/// <param name="step"></param>
+	/// <returns></returns>
+	private static float QuantizeAngleDegrees(float degrees, float step)
+	{
+		return QuantizeFloat(Mathf.Repeat(degrees, 360.0f), step);
+	}
+
+	/// <summary>
+	/// Quantizes one scalar with the provided step.
+	/// </summary>
+	/// <param name="value"></param>
+	/// <param name="step"></param>
+	/// <returns></returns>
+	private static float QuantizeFloat(float value, float step)
+	{
+		if (step <= 0.0f)
+			return value;
+
+		return Mathf.Round(value / step) * step;
+	}
+
+	/// <summary>
+	/// Combines one integer into a rolling hash.
+	/// </summary>
+	/// <param name="hash"></param>
+	/// <param name="value"></param>
+	/// <returns></returns>
+	private static int CombineHash(int hash, int value)
+	{
+		unchecked
+		{
+			return (hash * 31) + value;
 		}
 	}
 
@@ -1528,7 +1880,6 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedAdditionalLightsCount = int.MinValue;
 		cachedLightsHash = int.MinValue;
 		cachedMainCameraFrustumPlanesHash = int.MinValue;
-		cachedFroxelHash = int.MinValue;
 		cachedDistance = float.NaN;
 		cachedBaseHeight = float.NaN;
 		cachedMaximumHeight = float.NaN;
@@ -1553,6 +1904,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		froxelLightIndicesBuffer?.Release();
 		froxelLightIndicesBuffer = null;
+		cachedFroxelHash = int.MinValue;
 	}
 
 #if UNITY_6000_0_OR_NEWER
@@ -1566,7 +1918,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	/// <param name="volumetricFogRenderTarget"></param>
 	/// <param name="volumetricFogBlurRenderTarget"></param>
 	/// <param name="volumetricFogUpsampleCompositionTarget"></param>
-	private void CreateRenderGraphTextures(RenderGraph renderGraph, UniversalCameraData cameraData, VolumetricFogVolumeComponent fogVolume, out TextureHandle downsampledCameraDepthTarget, out TextureHandle volumetricFogRenderTarget, out TextureHandle volumetricFogBlurRenderTarget, out TextureHandle volumetricFogUpsampleCompositionTarget)
+	private void CreateRenderGraphTextures(RenderGraph renderGraph, UniversalCameraData cameraData, VolumetricFogVolumeComponent fogVolume, out TextureHandle downsampledCameraDepthTarget, out TextureHandle volumetricFogRenderTarget, out TextureHandle rawVolumetricFogRenderTarget, out TextureHandle volumetricFogBlurRenderTarget, out TextureHandle volumetricFogUpsampleCompositionTarget)
 	{
 		RenderTextureDescriptor cameraTargetDescriptor = cameraData.cameraTargetDescriptor;
 		cameraTargetDescriptor.depthBufferBits = (int)DepthBits.None;
@@ -1582,6 +1934,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		cameraTargetDescriptor.colorFormat = RenderTextureFormat.ARGBHalf;
 		volumetricFogRenderTarget = UniversalRenderer.CreateRenderGraphTexture(renderGraph, cameraTargetDescriptor, VolumetricFogRenderRTName, false);
+		rawVolumetricFogRenderTarget = UniversalRenderer.CreateRenderGraphTexture(renderGraph, cameraTargetDescriptor, RawVolumetricFogRenderRTName, false);
 		volumetricFogBlurRenderTarget = UniversalRenderer.CreateRenderGraphTexture(renderGraph, cameraTargetDescriptor, VolumetricFogBlurRTName, false);
 
 		cameraTargetDescriptor.width = originalResolution.x;
@@ -1607,6 +1960,12 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		else if (stage == PassStage.VolumetricFogUpsampleComposition)
 		{
 			passData.material.SetTexture(VolumetricFogTextureId, passData.volumetricFogRenderTarget);
+		}
+
+		if (stage == PassStage.VolumetricFogRawCopy)
+		{
+			Blitter.BlitTexture(context.cmd, passData.source, new Vector4(1.0f, 1.0f, 0.0f, 0.0f), 0.0f, false);
+			return;
 		}
 
 		Blitter.BlitTexture(context.cmd, passData.source, Vector2.one, passData.material, passData.materialPassIndex);
@@ -1671,6 +2030,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	{
 		downsampledCameraDepthRTHandle?.Release();
 		volumetricFogRenderRTHandle?.Release();
+		rawVolumetricFogRenderRTHandle?.Release();
 		volumetricFogBlurRTHandle?.Release();
 		volumetricFogUpsampleCompositionRTHandle?.Release();
 		ReleaseDebugSolidCubeResources();
