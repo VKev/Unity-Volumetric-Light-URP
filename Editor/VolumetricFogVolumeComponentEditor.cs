@@ -32,9 +32,12 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 	private SerializedDataParameter enableDust;
 	private SerializedDataParameter dustIntensity;
+	private SerializedDataParameter dustOpacity;
 	private SerializedDataParameter dustDensity;
 	private SerializedDataParameter dustScale;
 	private SerializedDataParameter dustSize;
+	private SerializedDataParameter dustBlur;
+	private SerializedDataParameter dustNoise;
 	private SerializedDataParameter dustDriftSpeed;
 	private SerializedDataParameter dustTint;
 
@@ -81,9 +84,12 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 		enableDust = Unpack(pf.Find(x => x.enableDust));
 		dustIntensity = Unpack(pf.Find(x => x.dustIntensity));
+		dustOpacity = Unpack(pf.Find(x => x.dustOpacity));
 		dustDensity = Unpack(pf.Find(x => x.dustDensity));
 		dustScale = Unpack(pf.Find(x => x.dustScale));
 		dustSize = Unpack(pf.Find(x => x.dustSize));
+		dustBlur = Unpack(pf.Find(x => x.dustBlur));
+		dustNoise = Unpack(pf.Find(x => x.dustNoise));
 		dustDriftSpeed = Unpack(pf.Find(x => x.dustDriftSpeed));
 		dustTint = Unpack(pf.Find(x => x.dustTint));
 
@@ -146,9 +152,12 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		if (enabledDust)
 		{
 			PropertyField(dustIntensity);
+			PropertyField(dustOpacity);
 			PropertyField(dustDensity);
 			PropertyField(dustScale);
 			PropertyField(dustSize);
+			PropertyField(dustBlur);
+			PropertyField(dustNoise);
 			PropertyField(dustDriftSpeed);
 			PropertyField(dustTint);
 		}

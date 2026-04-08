@@ -28,9 +28,12 @@ float _Absortion;
 float _APVContributionWeight;
 float _TransmittanceThreshold;
 float _DustIntensity;
+float _DustOpacity;
 float _DustDensity;
 float _DustScale;
 float _DustSize;
+float _DustBlur;
+float _DustNoise;
 float _DustDriftSpeed;
 float4 _DustTint;
 float _DustTime;
@@ -176,8 +179,10 @@ float GetVolumetricDustMask(float3 posWS)
     float3 moteCenter = lerp(moteCenterMin, 1.0 - moteCenterMin, VolumetricDustHash33(cellCoord + 17.0));
     float3 localPosition = frac(dustPosition) - moteCenter;
     float distanceToMote = length(localPosition);
-    float mask = 1.0 - smoothstep(dustSize * 0.35, dustSize, distanceToMote);
-    return mask * mask;
+    float innerRadius = dustSize * lerp(0.95, 0.05, saturate(_DustBlur));
+    float moteNoise = lerp(1.0, 0.5 + 0.5 * VolumetricDustHash13(cellCoord + 31.0), saturate(_DustNoise));
+    float mask = 1.0 - smoothstep(innerRadius, dustSize, distanceToMote);
+    return mask * mask * _DustOpacity * moteNoise;
 }
 #endif
 

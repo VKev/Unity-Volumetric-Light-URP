@@ -2,7 +2,7 @@
 
 ## [0.5.9] - 2026-04-08
 
-* Added procedural volumetric dust motes controlled from the existing volumetric fog volume.
+* Added procedural volumetric dust motes controlled from the existing volumetric fog volume, including opacity, blur and noise controls.
 * Dust is disabled by default and is integrated into the existing volumetric fog shading path without new render passes, render textures or particle system integration.
 
 ## [0.5.8] - 2025-09-11
