@@ -27,6 +27,13 @@ float _Density;
 float _Absortion;
 float _APVContributionWeight;
 float _TransmittanceThreshold;
+float _DustIntensity;
+float _DustDensity;
+float _DustScale;
+float _DustSize;
+float _DustDriftSpeed;
+float4 _DustTint;
+float _DustTime;
 float3 _Tint;
 int _MaxSteps;
 
@@ -138,6 +145,41 @@ float GetFogDensity(float posWSy)
 
     return _Density * t;
 }
+
+#if _VOLUMETRIC_DUST_ENABLED
+float VolumetricDustHash13(float3 p)
+{
+    p = frac(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+
+float3 VolumetricDustHash33(float3 p)
+{
+    p = frac(p * float3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return frac((p.xxy + p.yxx) * p.zyx);
+}
+
+float GetVolumetricDustMask(float3 posWS)
+{
+    const float3 driftDirection = float3(0.440383, 0.839801, 0.317486);
+    float3 dustPosition = (posWS + driftDirection * (_DustDriftSpeed * _DustTime)) * _DustScale;
+    float3 cellCoord = floor(dustPosition);
+
+    UNITY_BRANCH
+    if (VolumetricDustHash13(cellCoord) >= _DustDensity)
+        return 0.0;
+
+    float dustSize = max(_DustSize, 0.0001);
+    float3 moteCenterMin = float3(dustSize, dustSize, dustSize);
+    float3 moteCenter = lerp(moteCenterMin, 1.0 - moteCenterMin, VolumetricDustHash33(cellCoord + 17.0));
+    float3 localPosition = frac(dustPosition) - moteCenter;
+    float distanceToMote = length(localPosition);
+    float mask = 1.0 - smoothstep(dustSize * 0.35, dustSize, distanceToMote);
+    return mask * mask;
+}
+#endif
 
 // Gets the GI evaluation from the adaptive probe volume at one raymarch step.
 float3 GetStepAdaptiveProbeVolumeEvaluation(float2 uv, float3 posWS, float density)
@@ -365,6 +407,10 @@ float4 VolumetricFog(float2 uv, float2 positionCS)
         
         // TODO: Additional contributions? Reflection probes, etc...
         half3 stepColor = apvColor + mainLightColor + additionalLightsColor;
+#if _VOLUMETRIC_DUST_ENABLED
+        float dustMask = GetVolumetricDustMask(currPosWS);
+        stepColor += stepColor * (half3)(_DustTint.rgb * (dustMask * _DustIntensity));
+#endif
         volumetricFogColor += ((float3)stepColor * (transmittance * stepLength));
 
         UNITY_BRANCH

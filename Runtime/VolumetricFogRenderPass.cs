@@ -129,6 +129,13 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static readonly int TintId = Shader.PropertyToID("_Tint");
 	private static readonly int MaxStepsId = Shader.PropertyToID("_MaxSteps");
 	private static readonly int TransmittanceThresholdId = Shader.PropertyToID("_TransmittanceThreshold");
+	private static readonly int DustIntensityId = Shader.PropertyToID("_DustIntensity");
+	private static readonly int DustDensityId = Shader.PropertyToID("_DustDensity");
+	private static readonly int DustScaleId = Shader.PropertyToID("_DustScale");
+	private static readonly int DustSizeId = Shader.PropertyToID("_DustSize");
+	private static readonly int DustDriftSpeedId = Shader.PropertyToID("_DustDriftSpeed");
+	private static readonly int DustTintId = Shader.PropertyToID("_DustTint");
+	private static readonly int DustTimeId = Shader.PropertyToID("_DustTime");
 	private static readonly int FroxelGridDimensionsId = Shader.PropertyToID("_FroxelGridDimensions");
 	private static readonly int FroxelNearFarId = Shader.PropertyToID("_FroxelNearFar");
 	private static readonly int FroxelMetaBufferId = Shader.PropertyToID("_FroxelMetaBuffer");
@@ -217,6 +224,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static bool cachedAdditionalLightsContributionEnabled;
 	private static bool cachedSceneViewMainCameraFrustumMaskEnabled;
 	private static bool cachedFroxelClusteredLightsEnabled;
+	private static bool cachedDustEnabled;
 #if UNITY_2023_1_OR_NEWER
 	private static bool cachedAPVContributionEnabled;
 #endif
@@ -238,6 +246,12 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 	private static Color cachedTint;
 	private static int cachedMaxSteps;
 	private static float cachedTransmittanceThreshold;
+	private static float cachedDustIntensity;
+	private static float cachedDustDensity;
+	private static float cachedDustScale;
+	private static float cachedDustSize;
+	private static float cachedDustDriftSpeed;
+	private static Color cachedDustTint;
 
 	#endregion
 
@@ -564,6 +578,12 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 
 		bool enableMainLightContribution = fogVolume.enableMainLightContribution.value && fogVolume.scattering.value > 0.0f && mainLightIndex > -1;
 		bool enableAdditionalLightsContribution = fogVolume.enableAdditionalLightsContribution.value && additionalLightsCount > 0 && fogVolume.maxAdditionalLights.value > 0;
+		float dustIntensity = fogVolume.dustIntensity.value;
+		float dustDensity = fogVolume.dustDensity.value;
+		float dustScale = fogVolume.dustScale.value;
+		float dustSize = fogVolume.dustSize.value;
+		float dustDriftSpeed = fogVolume.dustDriftSpeed.value;
+		bool enableDust = fogVolume.enableDust.value && dustIntensity > 0.0f && dustDensity > 0.0f && dustScale > 0.0f && dustSize > 0.0f;
 
 		int lightsHash = 0;
 		int effectiveAdditionalLightsCount = 0;
@@ -605,6 +625,16 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 			cachedAdditionalLightsContributionEnabled = enableAdditionalLightsContribution;
 		}
 
+		if (!isMaterialStateInitialized || cachedDustEnabled != enableDust)
+		{
+			if (enableDust)
+				volumetricFogMaterial.EnableKeyword("_VOLUMETRIC_DUST_ENABLED");
+			else
+				volumetricFogMaterial.DisableKeyword("_VOLUMETRIC_DUST_ENABLED");
+
+			cachedDustEnabled = enableDust;
+		}
+
 		volumetricFogMaterial.SetInteger(FrameCountId, Time.renderedFrameCount % 64);
 		SetIntIfChanged(volumetricFogMaterial, CustomAdditionalLightsCountId, effectiveAdditionalLightsCount, ref cachedAdditionalLightsCount);
 		SetFloatIfChanged(volumetricFogMaterial, DistanceId, fogVolume.distance.value, ref cachedDistance);
@@ -622,6 +652,17 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		SetColorIfChanged(volumetricFogMaterial, TintId, fogVolume.tint.value, ref cachedTint);
 		SetIntIfChanged(volumetricFogMaterial, MaxStepsId, fogVolume.maxSteps.value, ref cachedMaxSteps);
 		SetFloatIfChanged(volumetricFogMaterial, TransmittanceThresholdId, fogVolume.transmittanceThreshold.value, ref cachedTransmittanceThreshold);
+
+		if (enableDust)
+		{
+			SetFloatIfChanged(volumetricFogMaterial, DustIntensityId, dustIntensity, ref cachedDustIntensity);
+			SetFloatIfChanged(volumetricFogMaterial, DustDensityId, dustDensity, ref cachedDustDensity);
+			SetFloatIfChanged(volumetricFogMaterial, DustScaleId, dustScale, ref cachedDustScale);
+			SetFloatIfChanged(volumetricFogMaterial, DustSizeId, dustSize, ref cachedDustSize);
+			SetFloatIfChanged(volumetricFogMaterial, DustDriftSpeedId, dustDriftSpeed, ref cachedDustDriftSpeed);
+			SetColorIfChanged(volumetricFogMaterial, DustTintId, fogVolume.dustTint.value, ref cachedDustTint);
+			volumetricFogMaterial.SetFloat(DustTimeId, Time.realtimeSinceStartup);
+		}
 
 		if (enableMainLightContribution || effectiveAdditionalLightsCount > 0)
 		{
@@ -1874,6 +1915,7 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedAdditionalLightsContributionEnabled = false;
 		cachedSceneViewMainCameraFrustumMaskEnabled = false;
 		cachedFroxelClusteredLightsEnabled = false;
+		cachedDustEnabled = false;
 #if UNITY_2023_1_OR_NEWER
 		cachedAPVContributionEnabled = false;
 #endif
@@ -1892,6 +1934,12 @@ public sealed class VolumetricFogRenderPass : ScriptableRenderPass
 		cachedTint = new Color(float.NaN, float.NaN, float.NaN, float.NaN);
 		cachedMaxSteps = int.MinValue;
 		cachedTransmittanceThreshold = float.NaN;
+		cachedDustIntensity = float.NaN;
+		cachedDustDensity = float.NaN;
+		cachedDustScale = float.NaN;
+		cachedDustSize = float.NaN;
+		cachedDustDriftSpeed = float.NaN;
+		cachedDustTint = new Color(float.NaN, float.NaN, float.NaN, float.NaN);
 	}
 
 	/// <summary>

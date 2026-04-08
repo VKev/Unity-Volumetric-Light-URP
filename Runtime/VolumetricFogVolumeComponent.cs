@@ -60,6 +60,22 @@ public sealed class VolumetricFogVolumeComponent : VolumeComponent, IPostProcess
 	[Tooltip("Disabling this will avoid computing additional lights contribution to fog, which in most cases will lead to better performance.")]
 	public BoolParameter enableAdditionalLightsContribution = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
 
+	[Header("Dust")]
+	[Tooltip("When enabled, adds subtle procedural dust motes inside lit volumetric fog.")]
+	public BoolParameter enableDust = new BoolParameter(false, BoolParameter.DisplayType.Checkbox, true);
+	[Tooltip("Brightness multiplier for the lit dust contribution.")]
+	public ClampedFloatParameter dustIntensity = new ClampedFloatParameter(0.35f, 0.0f, 4.0f);
+	[Tooltip("Occupancy probability of dust motes in world-space cells. Lower values produce fewer motes.")]
+	public ClampedFloatParameter dustDensity = new ClampedFloatParameter(0.35f, 0.0f, 1.0f);
+	[Tooltip("World-space cell frequency used by procedural dust. Higher values produce smaller, more frequent cells.")]
+	public ClampedFloatParameter dustScale = new ClampedFloatParameter(1.5f, 0.05f, 8.0f);
+	[Tooltip("Normalized radius of each dust mote inside its world-space cell.")]
+	public ClampedFloatParameter dustSize = new ClampedFloatParameter(0.08f, 0.01f, 0.5f);
+	[Tooltip("Speed of procedural dust drift over time.")]
+	public ClampedFloatParameter dustDriftSpeed = new ClampedFloatParameter(0.15f, 0.0f, 4.0f);
+	[Tooltip("HDR tint applied to the lit dust contribution.")]
+	public ColorParameter dustTint = new ColorParameter(Color.white, true, true, true);
+
 	[Header("Performance & Quality")]
 	[Tooltip("Resolution at which volumetric fog is raymarched before upsampling. Quarter resolution is significantly faster but blurrier.")]
 	public VolumetricFogDownsampleModeParameter downsampleMode = new VolumetricFogDownsampleModeParameter(VolumetricFogDownsampleMode.Half);

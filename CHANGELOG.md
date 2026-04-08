@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.9] - 2026-04-08
+
+* Added procedural volumetric dust motes controlled from the existing volumetric fog volume.
+* Dust is disabled by default and is integrated into the existing volumetric fog shading path without new render passes, render textures or particle system integration.
+
 ## [0.5.8] - 2025-09-11
 
 * Safety check for array OOB with very high number of lights being visible in the scene.

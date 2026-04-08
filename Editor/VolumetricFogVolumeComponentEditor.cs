@@ -30,6 +30,14 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 
 	private SerializedDataParameter enableAdditionalLightsContribution;
 
+	private SerializedDataParameter enableDust;
+	private SerializedDataParameter dustIntensity;
+	private SerializedDataParameter dustDensity;
+	private SerializedDataParameter dustScale;
+	private SerializedDataParameter dustSize;
+	private SerializedDataParameter dustDriftSpeed;
+	private SerializedDataParameter dustTint;
+
 	private SerializedDataParameter downsampleMode;
 	private SerializedDataParameter maxSteps;
 	private SerializedDataParameter maxAdditionalLights;
@@ -70,6 +78,14 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		tint = Unpack(pf.Find(x => x.tint));
 
 		enableAdditionalLightsContribution = Unpack(pf.Find(x => x.enableAdditionalLightsContribution));
+
+		enableDust = Unpack(pf.Find(x => x.enableDust));
+		dustIntensity = Unpack(pf.Find(x => x.dustIntensity));
+		dustDensity = Unpack(pf.Find(x => x.dustDensity));
+		dustScale = Unpack(pf.Find(x => x.dustScale));
+		dustSize = Unpack(pf.Find(x => x.dustSize));
+		dustDriftSpeed = Unpack(pf.Find(x => x.dustDriftSpeed));
+		dustTint = Unpack(pf.Find(x => x.dustTint));
 
 		downsampleMode = Unpack(pf.Find(x => x.downsampleMode));
 		maxSteps = Unpack(pf.Find(x => x.maxSteps));
@@ -124,6 +140,18 @@ public sealed class VolumetricFogVolumeComponentEditor : VolumeComponentEditor
 		}
 
 		PropertyField(enableAdditionalLightsContribution);
+
+		bool enabledDust = enableDust.overrideState.boolValue && enableDust.value.boolValue;
+		PropertyField(enableDust);
+		if (enabledDust)
+		{
+			PropertyField(dustIntensity);
+			PropertyField(dustDensity);
+			PropertyField(dustScale);
+			PropertyField(dustSize);
+			PropertyField(dustDriftSpeed);
+			PropertyField(dustTint);
+		}
 
 		PropertyField(downsampleMode);
 		PropertyField(maxSteps);
